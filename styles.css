@@ -1,0 +1,181 @@
+/* Scroll-driven Space Shuttle — styles
+   Independent re-implementation of ste-vg's CodePen (GRooLza). */
+
+:root {
+  --bg-top: #0a0e1a;
+  --bg-bot: #05070f;
+  --ink: #eef2ff;
+  --muted: #8b95b3;
+  --accent: #5fd0ff;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
+
+body {
+  font-family: "Inter", "Helvetica Neue", system-ui, sans-serif;
+  color: var(--ink);
+  background: linear-gradient(180deg, var(--bg-top), var(--bg-bot));
+  overflow-x: hidden;
+}
+
+/* ---- 3D stage: fixed full-screen canvas behind content ---- */
+#scene {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  z-index: 1;
+  display: block;
+}
+
+/* ---- Loading overlay ---- */
+.loader {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(180deg, var(--bg-top), var(--bg-bot));
+  transition: opacity 0.8s ease;
+}
+.loader.is-hidden { opacity: 0; pointer-events: none; }
+.loader__inner { text-align: center; width: min(320px, 70vw); }
+.loader__title {
+  letter-spacing: 0.45em;
+  font-size: 0.85rem;
+  color: var(--muted);
+  margin-bottom: 1.2rem;
+  padding-left: 0.45em;
+}
+.loader__bar {
+  height: 2px;
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.loader__bar span {
+  display: block;
+  height: 100%;
+  width: 0%;
+  background: var(--accent);
+  transition: width 0.2s ease;
+}
+.loader__pct {
+  margin-top: 0.8rem;
+  font-size: 0.75rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- Top bar ---- */
+.topbar {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1.4rem clamp(1.2rem, 4vw, 3rem);
+  mix-blend-mode: difference;
+}
+.topbar__brand { letter-spacing: 0.3em; font-weight: 600; font-size: 0.85rem; }
+.topbar__nav { display: flex; gap: 1.8rem; }
+.topbar__nav a {
+  color: var(--ink);
+  text-decoration: none;
+  font-size: 0.78rem;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  opacity: 0.8;
+}
+.topbar__nav a:hover { opacity: 1; }
+
+/* ---- HUD destination label ---- */
+.hud {
+  position: fixed;
+  left: clamp(1.2rem, 4vw, 3rem);
+  bottom: 1.6rem;
+  z-index: 10;
+  font-size: 0.72rem;
+  letter-spacing: 0.28em;
+  text-transform: uppercase;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+  padding-left: 1.2rem;
+  border-left: 2px solid var(--accent);
+  mix-blend-mode: difference;
+}
+
+/* ---- Scrolling content ---- */
+.content { position: relative; z-index: 5; }
+
+.panel {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 6rem clamp(1.2rem, 6vw, 7rem);
+  max-width: 620px;
+}
+.panel--center { align-items: center; text-align: center; max-width: 760px; margin: 0 auto; }
+.panel--right { margin-left: auto; align-items: flex-end; text-align: right; }
+
+.eyebrow {
+  text-transform: uppercase;
+  letter-spacing: 0.3em;
+  font-size: 0.72rem;
+  color: var(--accent);
+  margin-bottom: 1.2rem;
+}
+.step-num {
+  display: block;
+  font-size: 0.8rem;
+  letter-spacing: 0.3em;
+  color: var(--accent);
+  margin-bottom: 0.8rem;
+}
+h1 {
+  font-size: clamp(3rem, 11vw, 8rem);
+  font-weight: 800;
+  line-height: 0.92;
+  letter-spacing: -0.02em;
+  text-shadow: 0 8px 60px rgba(0, 0, 0, 0.6);
+}
+h2 {
+  font-size: clamp(2rem, 6vw, 3.6rem);
+  font-weight: 700;
+  line-height: 1;
+  margin-bottom: 1rem;
+}
+.lede { font-size: clamp(1rem, 2.2vw, 1.3rem); color: #c8d0ea; line-height: 1.6; margin-top: 1.4rem; }
+.panel p { color: var(--muted); font-size: 1.05rem; line-height: 1.7; max-width: 42ch; }
+.panel--right p { margin-left: auto; }
+
+.scroll-hint {
+  margin-top: 3rem;
+  font-size: 0.78rem;
+  letter-spacing: 0.25em;
+  text-transform: uppercase;
+  color: var(--muted);
+  animation: bob 2s ease-in-out infinite;
+}
+@keyframes bob { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(8px); } }
+
+.credit {
+  margin-top: 2.5rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.credit a { color: var(--accent); }
+
+/* ---- Reveal animation hooks (driven by GSAP) ---- */
+.panel > * { will-change: transform, opacity; }
+
+@media (max-width: 720px) {
+  .topbar__nav { display: none; }
+  .panel, .panel--right { max-width: 100%; align-items: flex-start; text-align: left; margin: 0; }
+  .panel--center { align-items: center; text-align: center; }
+  .panel--right p { margin-left: 0; }
+}

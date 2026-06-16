@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<!--
+  Scroll-driven Space Shuttle
+  ----------------------------------------------------------------------------
+  Replica of the scroll-controlled 3D shuttle demo originally created by
+  Steve Gardner (ste-vg) — https://codepen.io/ste-vg/pen/GRooLza
+  This is an independent re-implementation (Three.js + GSAP ScrollTrigger).
+
+  ONE CHANGE FROM THE ORIGINAL:
+  The 3D model has been swapped for a user-supplied asset:
+      "Space Shuttle (1).glb"
+  ----------------------------------------------------------------------------
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Space Shuttle — scroll-driven 3D</title>
+  <link rel="stylesheet" href="styles.css" />
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+  <!-- Loading overlay -->
+  <div id="loader" class="loader">
+    <div class="loader__inner">
+      <div class="loader__title">SPACE SHUTTLE</div>
+      <div class="loader__bar"><span id="loader-fill"></span></div>
+      <div class="loader__pct"><span id="loader-pct">0</span>%</div>
+    </div>
+  </div>
+
+  <!-- Fixed 3D stage -->
+  <canvas id="scene"></canvas>
+
+  <!-- Scroll content -->
+  <header class="topbar">
+    <div class="topbar__brand">◇ ORBITAL</div>
+    <nav class="topbar__nav">
+      <a href="#nebula">Nebula</a>
+      <a href="#galaxy">Galaxy</a>
+      <a href="#landing">Kepler-452b</a>
+    </nav>
+  </header>
+
+  <div id="hud-label" class="hud">DEPARTURE — LOW EARTH ORBIT</div>
+
+  <main class="content">
+    <section class="panel panel--center" data-step="0" id="intro">
+      <p class="eyebrow">Interstellar transit · Destination Kepler-452b</p>
+      <h1>The Long<br>Voyage</h1>
+      <p class="lede">Scroll to fly the shuttle out of orbit, through a nebula
+        and across the galaxy — all the way to a distant exoplanet.</p>
+      <div class="scroll-hint">Scroll ↓</div>
+    </section>
+
+    <section class="panel panel--left" data-step="1" id="nebula">
+      <span class="step-num">01</span>
+      <h2>Into the Nebula</h2>
+      <p>Clouds of ionised gas glow magenta and cyan as the shuttle threads
+        between them — the glowing nursery where new stars are born.</p>
+    </section>
+
+    <section class="panel panel--right" data-step="2" id="galaxy">
+      <span class="step-num">02</span>
+      <h2>Across the Galaxy</h2>
+      <p>A spiral disc of a hundred billion suns wheels past below. The route
+        cuts clean through the galactic plane toward a quieter arm.</p>
+    </section>
+
+    <section class="panel panel--left" data-step="3" id="approach">
+      <span class="step-num">03</span>
+      <h2>Approach: Kepler-452b</h2>
+      <p>A super-Earth orbiting a Sun-like star roughly 1,800 light-years away.
+        Its pale-blue atmosphere swells in the forward viewport.</p>
+    </section>
+
+    <section class="panel panel--center" data-step="4" id="landing">
+      <span class="step-num">04</span>
+      <h2>Touchdown</h2>
+      <p class="lede">Nose up, engines easing — the shuttle flares and settles
+        over the surface of a world no human has ever seen.</p>
+      <footer class="credit">
+        Path/scroll concept after a CodePen by
+        <a href="https://codepen.io/ste-vg/pen/GRooLza" target="_blank" rel="noopener">Steve Gardner</a>.
+        Model: <em>Space Shuttle (1).glb</em>.
+      </footer>
+    </section>
+  </main>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
