@@ -1,22 +1,29 @@
 <!DOCTYPE html>
 <!--
-  Scroll-driven Space Shuttle
+  Scroll-driven Space Shuttle — launch + interstellar voyage
   ----------------------------------------------------------------------------
-  Replica of the scroll-controlled 3D shuttle demo originally created by
-  Steve Gardner (ste-vg) — https://codepen.io/ste-vg/pen/GRooLza
-  This is an independent re-implementation (Three.js + GSAP ScrollTrigger).
+  Independent re-implementation of the scroll-controlled 3D shuttle demo by
+  Steve Gardner (ste-vg): https://codepen.io/ste-vg/pen/GRooLza
+  Built with Three.js. Scroll drives a flight path.
 
-  ONE CHANGE FROM THE ORIGINAL:
-  The 3D model has been swapped for a user-supplied asset:
-      "Space Shuttle (1).glb"
+  MODELS (user-supplied) — the change from the original:
+    1. "Space Shuttle (1).glb"        — full launch stack (orbiter + external
+                                         tank + twin solid rocket boosters).
+                                         Shown during liftoff and ascent.
+    2. "Space Shuttle Orbiter.glb"     — orbiter only. Revealed after the
+                                         thrusters/tank are jettisoned; flies
+                                         the rest of the voyage to Kepler-452b.
+
+  Both models are static (no baked animation); the launch, the booster/tank
+  separation, the model swap and the whole travel path are animated in code.
   ----------------------------------------------------------------------------
 -->
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Space Shuttle — scroll-driven 3D</title>
-  <link rel="stylesheet" href="styles.css" />
+  <title>Space Shuttle — launch to Kepler-452b</title>
+  <link rel="stylesheet" href="styles.css?v=7" />
   <script type="importmap">
   {
     "imports": {
@@ -42,58 +49,76 @@
   <!-- Scroll content -->
   <header class="topbar">
     <div class="topbar__brand">◇ ORBITAL</div>
-    <nav class="topbar__nav">
-      <a href="#nebula">Nebula</a>
-      <a href="#galaxy">Galaxy</a>
-      <a href="#landing">Kepler-452b</a>
-    </nav>
   </header>
 
-  <div id="hud-label" class="hud">DEPARTURE — LOW EARTH ORBIT</div>
+  <div id="hud-label" class="hud">IGNITION — LAUNCH PAD</div>
 
   <main class="content">
     <section class="panel panel--center" data-step="0" id="intro">
-      <p class="eyebrow">Interstellar transit · Destination Kepler-452b</p>
-      <h1>The Long<br>Voyage</h1>
-      <p class="lede">Scroll to fly the shuttle out of orbit, through a nebula
-        and across the galaxy — all the way to a distant exoplanet.</p>
+      <p class="eyebrow">Launch · Mission to Kepler-452b</p>
+      <h1>Liftoff</h1>
+      <p class="lede">Scroll to ignite the stack, ride it off the pad, shed the
+        boosters and tank, and carry the orbiter all the way to a distant world.</p>
       <div class="scroll-hint">Scroll ↓</div>
     </section>
 
-    <section class="panel panel--left" data-step="1" id="nebula">
+    <section class="panel panel--left" data-step="1" id="ascent">
       <span class="step-num">01</span>
+      <h2>Ascent</h2>
+      <p>Three engines and twin solid rocket boosters punch the full stack up
+        through the atmosphere — over thirty meganewtons of thrust.</p>
+    </section>
+
+    <section class="panel panel--right" data-step="2" id="sep">
+      <span class="step-num">02</span>
+      <h2>Booster Separation</h2>
+      <p>Spent and empty, the two solid rocket boosters are cut loose and
+        tumble away, peeling off either side of the climbing vehicle.</p>
+    </section>
+
+    <section class="panel panel--left" data-step="3" id="jettison">
+      <span class="step-num">03</span>
+      <h2>Tank Jettison</h2>
+      <p>The great external tank falls back toward the planet. What flies on is
+        the orbiter alone — clean, light, and bound for deep space.</p>
+    </section>
+
+    <section class="panel panel--right" data-step="4" id="depart">
+      <span class="step-num">04</span>
+      <h2>Leaving Earth</h2>
+      <p>Home dwindles to a blue marble astern as the orbiter accelerates out
+        of the gravity well and points itself at open sky.</p>
+    </section>
+
+    <section class="panel panel--left" data-step="5" id="nebula">
+      <span class="step-num">05</span>
       <h2>Into the Nebula</h2>
-      <p>Clouds of ionised gas glow magenta and cyan as the shuttle threads
+      <p>Clouds of ionised gas glow magenta and cyan as the orbiter threads
         between them — the glowing nursery where new stars are born.</p>
     </section>
 
-    <section class="panel panel--right" data-step="2" id="galaxy">
-      <span class="step-num">02</span>
+    <section class="panel panel--right" data-step="6" id="galaxy">
+      <span class="step-num">06</span>
       <h2>Across the Galaxy</h2>
       <p>A spiral disc of a hundred billion suns wheels past below. The route
         cuts clean through the galactic plane toward a quieter arm.</p>
     </section>
 
-    <section class="panel panel--left" data-step="3" id="approach">
-      <span class="step-num">03</span>
+    <section class="panel panel--left" data-step="7" id="approach">
+      <span class="step-num">07</span>
       <h2>Approach: Kepler-452b</h2>
       <p>A super-Earth orbiting a Sun-like star roughly 1,800 light-years away.
-        Its pale-blue atmosphere swells in the forward viewport.</p>
+        Its pale atmosphere swells in the forward viewport.</p>
     </section>
 
-    <section class="panel panel--center" data-step="4" id="landing">
-      <span class="step-num">04</span>
+    <section class="panel panel--center" data-step="8" id="landing">
+      <span class="step-num">08</span>
       <h2>Touchdown</h2>
-      <p class="lede">Nose up, engines easing — the shuttle flares and settles
+      <p class="lede">Nose up, engines easing — the orbiter flares and settles
         over the surface of a world no human has ever seen.</p>
-      <footer class="credit">
-        Path/scroll concept after a CodePen by
-        <a href="https://codepen.io/ste-vg/pen/GRooLza" target="_blank" rel="noopener">Steve Gardner</a>.
-        Model: <em>Space Shuttle (1).glb</em>.
-      </footer>
     </section>
   </main>
 
-  <script type="module" src="app.js"></script>
+  <script type="module" src="app.js?v=8"></script>
 </body>
 </html>

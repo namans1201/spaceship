@@ -1,34 +1,48 @@
 /* ----------------------------------------------------------------------------
- * Scroll-driven Space Shuttle — flight path edition
+ * Scroll-driven Space Shuttle — launch + interstellar voyage
  *
  * Independent re-implementation of the scroll-controlled 3D shuttle demo by
  * Steve Gardner (ste-vg): https://codepen.io/ste-vg/pen/GRooLza
  *
- * CHANGES FROM THE ORIGINAL:
- *  1. The model is the user-supplied asset "Space Shuttle (1).glb"
- *     (loaded, auto-centered and auto-scaled at runtime).
- *  2. The camera no longer orbits a static model — the shuttle flies along a
- *     scroll-driven PATH: departure -> nebula -> galaxy -> landing on the
- *     exoplanet Kepler-452b.
+ * The whole experience is one scroll-driven flight path:
+ *   IGNITION -> ASCENT -> BOOSTER SEPARATION -> TANK JETTISON (model swap)
+ *   -> LEAVE EARTH -> NEBULA -> GALAXY -> APPROACH -> LAND on Kepler-452b
  *
- * Stack: Three.js (WebGL) + GSAP ScrollTrigger.
+ * MODELS (user-supplied):
+ *   "Space Shuttle (1).glb"      — full launch stack. Its meshes are split by
+ *                                   MATERIAL into orbiter vs tank/boosters; the
+ *                                   non-orbiter parts are jettisoned in code.
+ *   "Space Shuttle Orbiter.glb"  — orbiter only. Scaled to overlay the stack's
+ *                                   orbiter portion, revealed at jettison, then
+ *                                   flies the rest of the voyage.
+ *
+ * Neither GLB has baked animation — liftoff, separation, the swap and the path
+ * are all animated procedurally with Three.js transforms.
  * -------------------------------------------------------------------------- */
 
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
-import { gsap } from "https://unpkg.com/gsap@3.12.5/index.js";
-import { ScrollTrigger } from "https://unpkg.com/gsap@3.12.5/ScrollTrigger.js";
 
-gsap.registerPlugin(ScrollTrigger);
+const STACK_URL = encodeURI("Space Shuttle (1).glb");
+const ORBITER_URL = encodeURI("Space Shuttle Orbiter.glb");
+// Materials that belong to the orbiter (shared by both GLBs). Everything else
+// in the full stack is tank + boosters and gets jettisoned.
+const ORBITER_MATS = new Set(["mat5", "mat14", "mat21", "mat23"]);
 
-const MODEL_URL = encodeURI("Space Shuttle (1).glb");
-
-/* --- Small math helpers --------------------------------------------------- */
+/* --- Math helpers --------------------------------------------------------- */
 const lerp = (a, b, t) => a + (b - a) * t;
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
-const smooth = (t) => t * t * (3 - 2 * t); // smoothstep
-// Remap p from [a,b] -> [0,1], clamped.
+const smooth = (t) => t * t * (3 - 2 * t);
 const seg = (p, a, b) => clamp((p - a) / (b - a), 0, 1);
+
+/* --- Phase boundaries (scroll progress 0..1) ------------------------------ */
+const P = {
+  ascentEnd: 0.12,   // full stack climbs
+  boostA: 0.12, boostB: 0.18,   // booster separation window
+  tankA: 0.18, tankB: 0.26,     // external tank jettison window (swap at end)
+  departEnd: 0.40,   // orbiter pulls away from Earth
+  landA: 0.88, landB: 1.0,
+};
 
 /* --- Renderer / scene / camera ------------------------------------------- */
 const canvas = document.getElementById("scene");
@@ -40,20 +54,17 @@ renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.15;
 
 const scene = new THREE.Scene();
-scene.fog = new THREE.FogExp2(0x05070f, 0.0035);
+scene.fog = new THREE.FogExp2(0x05070f, 0.0028);
 
-const camera = new THREE.PerspectiveCamera(
-  50, window.innerWidth / window.innerHeight, 0.1, 2000
-);
+const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 3000);
 
-/* --- The flight path ------------------------------------------------------ *
- * Everything lives along -Z. The shuttle flies from z=0 deep into the scene;
- * the camera chases it. Region centres are placed along the route. */
+/* --- Flight path layout (along -Z) ---------------------------------------- */
 const PATH = {
-  startZ: 0,
-  endZ: -560,            // shuttle's final resting z (just above the planet)
-  nebulaZ: -150,
-  galaxyZ: -340,
+  startZ: 30,
+  endZ: -560,
+  earth: { center: new THREE.Vector3(0, -52, 46), radius: 44 },
+  nebulaZ: -235,
+  galaxyZ: -370,
   planet: { center: new THREE.Vector3(0, -60, -600), radius: 55 },
 };
 
@@ -68,81 +79,100 @@ const rim = new THREE.DirectionalLight(0x5fd0ff, 1.4);
 rim.position.set(-6, 2, -4);
 scene.add(rim);
 
-// Light that travels with the shuttle so it stays lit inside the nebula.
-const escort = new THREE.PointLight(0xbfd4ff, 2.0, 120);
+const escort = new THREE.PointLight(0xbfd4ff, 2.0, 140);
 scene.add(escort);
+
+// Sun for the destination planet.
+const sun = new THREE.DirectionalLight(0xfff4e0, 2.6);
+sun.position.set(120, 60, -480);
+scene.add(sun);
+
+// Sun lighting Earth at the start.
+const earthSun = new THREE.DirectionalLight(0xfff0d8, 2.2);
+earthSun.position.set(80, 30, 160);
+scene.add(earthSun);
 
 /* --- Starfield ------------------------------------------------------------ */
 function makeStars(count, spread, depth, size, color) {
   const pos = new Float32Array(count * 3);
   for (let i = 0; i < count; i++) {
-    const a = i * 2.39996323; // golden angle — deterministic spread
+    const a = i * 2.39996323;
     const r = (i % 97) / 97;
-    pos[i * 3] = (Math.cos(a) * (0.3 + r)) * spread;
-    pos[i * 3 + 1] = (Math.sin(a * 1.7) * (0.3 + r)) * spread;
-    pos[i * 3 + 2] = -((i / count) * depth);
+    pos[i * 3] = Math.cos(a) * (0.3 + r) * spread;
+    pos[i * 3 + 1] = Math.sin(a * 1.7) * (0.3 + r) * spread;
+    pos[i * 3 + 2] = 60 - ((i / count) * depth);
   }
   const geo = new THREE.BufferGeometry();
   geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
   const mat = new THREE.PointsMaterial({ color, size, transparent: true, opacity: 0.85, depthWrite: false });
-  const pts = new THREE.Points(geo, mat);
-  scene.add(pts);
-  return pts;
+  scene.add(new THREE.Points(geo, mat));
 }
-makeStars(2500, 220, 1400, 0.7, 0xaecbff);
-makeStars(1200, 120, 900, 0.45, 0xffffff);
+makeStars(2600, 240, 1500, 0.7, 0xaecbff);
+makeStars(1300, 130, 1000, 0.45, 0xffffff);
 
-/* --- Nebula: drifting clouds of additive points --------------------------- */
+/* --- A textured-looking planet (used for Earth and Kepler-452b) ----------- */
+function makePlanet({ center, radius, color, emissive, atmo }) {
+  const g = new THREE.Group();
+  g.position.copy(center);
+  g.add(new THREE.Mesh(
+    new THREE.SphereGeometry(radius, 96, 96),
+    new THREE.MeshStandardMaterial({ color, roughness: 0.95, metalness: 0, emissive, emissiveIntensity: 0.55 })
+  ));
+  const clouds = new THREE.Mesh(
+    new THREE.SphereGeometry(radius * 1.015, 64, 64),
+    new THREE.MeshStandardMaterial({ color: 0xffffff, transparent: true, opacity: 0.22, roughness: 1 })
+  );
+  g.add(clouds);
+  g.add(new THREE.Mesh(
+    new THREE.SphereGeometry(radius * 1.13, 64, 64),
+    new THREE.MeshBasicMaterial({ color: atmo, transparent: true, opacity: 0.18, side: THREE.BackSide, blending: THREE.AdditiveBlending, depthWrite: false })
+  ));
+  scene.add(g);
+  return { group: g, clouds };
+}
+
+const earth = makePlanet({ center: PATH.earth.center, radius: PATH.earth.radius, color: 0x2a5a9e, emissive: 0x0a1830, atmo: 0x6fb0ff });
+const kepler = makePlanet({ center: PATH.planet.center, radius: PATH.planet.radius, color: 0x3f7d6e, emissive: 0x09241f, atmo: 0x6fc0ff });
+
+/* --- Nebula --------------------------------------------------------------- */
 const nebula = new THREE.Group();
 nebula.position.z = PATH.nebulaZ;
 scene.add(nebula);
-
-function makeCloud(color, center, spread, count, size) {
+function makeCloud(color, c, spread, count, size) {
   const pos = new Float32Array(count * 3);
   for (let i = 0; i < count; i++) {
-    const a = i * 1.61803;
-    const b = i * 2.39996;
+    const a = i * 1.61803, b = i * 2.39996;
     const r = Math.pow((i % 113) / 113, 0.6);
-    pos[i * 3]     = center.x + Math.cos(a) * r * spread;
-    pos[i * 3 + 1] = center.y + Math.sin(b) * r * spread * 0.7;
-    pos[i * 3 + 2] = center.z + Math.cos(b * 1.3) * r * spread;
+    pos[i * 3] = c.x + Math.cos(a) * r * spread;
+    pos[i * 3 + 1] = c.y + Math.sin(b) * r * spread * 0.7;
+    pos[i * 3 + 2] = c.z + Math.cos(b * 1.3) * r * spread;
   }
   const geo = new THREE.BufferGeometry();
   geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
-  const mat = new THREE.PointsMaterial({
-    color, size, transparent: true, opacity: 0.5,
-    blending: THREE.AdditiveBlending, depthWrite: false,
-  });
-  nebula.add(new THREE.Points(geo, mat));
+  nebula.add(new THREE.Points(geo, new THREE.PointsMaterial({
+    color, size, transparent: true, opacity: 0.5, blending: THREE.AdditiveBlending, depthWrite: false,
+  })));
 }
-makeCloud(0xff4f9d, new THREE.Vector3(-14, 6, 0),  34, 1400, 2.2); // magenta
-makeCloud(0x7a5cff, new THREE.Vector3(12, -4, -20), 40, 1600, 2.6); // violet
-makeCloud(0x21d4ff, new THREE.Vector3(2, 10, -45),  36, 1500, 2.0); // cyan
-makeCloud(0xff9b5c, new THREE.Vector3(-6, -10, -70), 30, 1100, 2.4); // amber
+makeCloud(0xff4f9d, new THREE.Vector3(-14, 6, 0), 34, 1400, 2.2);
+makeCloud(0x7a5cff, new THREE.Vector3(12, -4, -20), 40, 1600, 2.6);
+makeCloud(0x21d4ff, new THREE.Vector3(2, 10, -45), 36, 1500, 2.0);
+makeCloud(0xff9b5c, new THREE.Vector3(-6, -10, -70), 30, 1100, 2.4);
 
-/* --- Galaxy: tilted spiral of points -------------------------------------- */
+/* --- Galaxy --------------------------------------------------------------- */
 const galaxy = new THREE.Group();
 galaxy.position.z = PATH.galaxyZ;
-galaxy.rotation.x = -0.9;
-galaxy.rotation.z = 0.3;
+galaxy.rotation.set(-0.9, 0, 0.3);
 scene.add(galaxy);
-
 (function buildGalaxy() {
-  const count = 9000;
-  const arms = 4;
-  const pos = new Float32Array(count * 3);
-  const col = new Float32Array(count * 3);
-  const core = new THREE.Color(0xfff2cf);
-  const edge = new THREE.Color(0x4a6bff);
+  const count = 9000, arms = 4;
+  const pos = new Float32Array(count * 3), col = new Float32Array(count * 3);
+  const core = new THREE.Color(0xfff2cf), edge = new THREE.Color(0x4a6bff);
   for (let i = 0; i < count; i++) {
-    const t = i / count;
-    const radius = Math.pow(t, 0.6) * 130;
-    const arm = (i % arms) / arms;
-    const angle = radius * 0.05 + arm * Math.PI * 2;
-    const scatter = (((i * 9301 + 49297) % 233280) / 233280 - 0.5);
-    const spread = (1 - t) * 6 + 2;
-    pos[i * 3]     = Math.cos(angle) * radius + scatter * spread * 4;
-    pos[i * 3 + 1] = scatter * spread * (1 - t) * 3;
+    const t = i / count, radius = Math.pow(t, 0.6) * 130;
+    const angle = radius * 0.05 + ((i % arms) / arms) * Math.PI * 2;
+    const sc = (((i * 9301 + 49297) % 233280) / 233280 - 0.5), spread = (1 - t) * 6 + 2;
+    pos[i * 3] = Math.cos(angle) * radius + sc * spread * 4;
+    pos[i * 3 + 1] = sc * spread * (1 - t) * 3;
     pos[i * 3 + 2] = Math.sin(angle) * radius + ((i % 7) - 3) * spread;
     const c = core.clone().lerp(edge, t);
     col[i * 3] = c.r; col[i * 3 + 1] = c.g; col[i * 3 + 2] = c.b;
@@ -150,54 +180,15 @@ scene.add(galaxy);
   const geo = new THREE.BufferGeometry();
   geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
   geo.setAttribute("color", new THREE.BufferAttribute(col, 3));
-  const mat = new THREE.PointsMaterial({
-    size: 1.4, vertexColors: true, transparent: true, opacity: 0.9,
-    blending: THREE.AdditiveBlending, depthWrite: false,
-  });
-  galaxy.add(new THREE.Points(geo, mat));
+  galaxy.add(new THREE.Points(geo, new THREE.PointsMaterial({
+    size: 1.4, vertexColors: true, transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false,
+  })));
 })();
 
-/* --- Kepler-452b: an earth-like super-Earth -------------------------------- */
-const planetGroup = new THREE.Group();
-planetGroup.position.copy(PATH.planet.center);
-scene.add(planetGroup);
-
-const planet = new THREE.Mesh(
-  new THREE.SphereGeometry(PATH.planet.radius, 96, 96),
-  new THREE.MeshStandardMaterial({
-    color: 0x3f7d6e, roughness: 0.95, metalness: 0.0,
-    emissive: 0x09241f, emissiveIntensity: 0.6,
-  })
-);
-planetGroup.add(planet);
-
-// Cloud shell.
-const clouds = new THREE.Mesh(
-  new THREE.SphereGeometry(PATH.planet.radius * 1.015, 64, 64),
-  new THREE.MeshStandardMaterial({ color: 0xffffff, transparent: true, opacity: 0.22, roughness: 1 })
-);
-planetGroup.add(clouds);
-
-// Atmosphere rim (backside-rendered glow).
-const atmosphere = new THREE.Mesh(
-  new THREE.SphereGeometry(PATH.planet.radius * 1.12, 64, 64),
-  new THREE.MeshBasicMaterial({
-    color: 0x6fc0ff, transparent: true, opacity: 0.18,
-    side: THREE.BackSide, blending: THREE.AdditiveBlending, depthWrite: false,
-  })
-);
-planetGroup.add(atmosphere);
-
-// A sun lighting the planet from the side.
-const sun = new THREE.DirectionalLight(0xfff4e0, 2.6);
-sun.position.set(120, 60, -480);
-scene.add(sun);
-
-/* --- Load the model ------------------------------------------------------- */
+/* --- Vehicle: full stack + orbiter, both loaded up front ------------------ */
 const loaderEl = document.getElementById("loader");
 const fillEl = document.getElementById("loader-fill");
 const pctEl = document.getElementById("loader-pct");
-
 const manager = new THREE.LoadingManager();
 manager.onProgress = (_u, loaded, total) => {
   const pct = total ? Math.round((loaded / total) * 100) : 0;
@@ -205,68 +196,136 @@ manager.onProgress = (_u, loaded, total) => {
   pctEl.textContent = pct;
 };
 
-let shuttle = null; // outer group: handles path position + flight attitude
+const TARGET = 3.4;        // world-space height of the full stack
+const vehicle = new THREE.Group();   // flies the whole path
+scene.add(vehicle);
 
-console.log("[dbg] starting load", MODEL_URL);
-new GLTFLoader(manager).load(
-  MODEL_URL,
-  (gltf) => {
-    console.log("[dbg] onLoad fired");
-    const model = gltf.scene;
-    const box = new THREE.Box3().setFromObject(model);
-    const size = box.getSize(new THREE.Vector3());
-    const center = box.getCenter(new THREE.Vector3());
-    const maxDim = Math.max(size.x, size.y, size.z) || 1;
-    model.position.sub(center);
-    model.scale.setScalar(3.0 / maxDim);
-    // The stack stands nose-up (+Y). Rotate so the nose points along -Z (forward).
-    model.rotation.x = Math.PI / 2;
+let stackRoot = null;      // full stack scene (visible during launch)
+let orbiterRoot = null;    // orbiter-only scene (visible after jettison)
+const discards = [];       // {mesh, basePos, baseRot, dir, spin, booster}
+let sepDist = 3;           // jettison travel distance (asset-local units)
 
-    shuttle = new THREE.Group();
-    shuttle.add(model);
-    scene.add(shuttle);
-
-    try { updatePath(0); } catch (e) { console.error("[dbg] updatePath(0) threw", e); }
-    console.log("[dbg] calling finishLoading");
-    finishLoading();
-  },
-  (xhr) => console.log("[dbg] progress", xhr.loaded, xhr.total),
-  (err) => {
-    console.error("Failed to load model:", err);
-    pctEl.parentElement.textContent = "Could not load model — serve over http (see README).";
-  }
-);
-
-function finishLoading() {
-  // CSS handles the fade via the .is-hidden class (transition on .loader).
-  loaderEl.classList.add("is-hidden");
+function load(url) {
+  return new Promise((res, rej) => new GLTFLoader(manager).load(url, res, undefined, rej));
 }
+
+Promise.all([load(STACK_URL), load(ORBITER_URL)])
+  .then(([stackGltf, orbiterGltf]) => { setupVehicle(stackGltf.scene, orbiterGltf.scene); finishLoading(); })
+  .catch((err) => {
+    console.error("Failed to load models:", err);
+    pctEl.parentElement.textContent = "Could not load models — serve over http (see README).";
+  });
+
+function setupVehicle(stack, orbiter) {
+  // Local size of the raw stack (before transforms) -> jettison distance.
+  const localBox = new THREE.Box3().setFromObject(stack);
+  const localSize = localBox.getSize(new THREE.Vector3());
+  sepDist = Math.max(localSize.x, localSize.y, localSize.z) * 1.25;
+
+  // Normalise the stack: nose along -Z, centred at the vehicle origin.
+  stack.rotation.x = Math.PI / 2;               // stand-up (+Y) -> forward (-Z)
+  const box = new THREE.Box3().setFromObject(stack);
+  const size = box.getSize(new THREE.Vector3());
+  const center = box.getCenter(new THREE.Vector3());
+  const scale = TARGET / Math.max(size.x, size.y, size.z);
+  stack.scale.setScalar(scale);
+  stack.position.sub(center.multiplyScalar(scale));
+  stackRoot = stack;
+  vehicle.add(stackRoot);
+
+  // Classify meshes by material: orbiter vs tank/boosters.
+  const orbiterParts = [];
+  stack.traverse((o) => {
+    if (!o.isMesh) return;
+    const mats = Array.isArray(o.material) ? o.material : [o.material];
+    const isOrbiter = mats.some((m) => ORBITER_MATS.has(m && m.name));
+    if (isOrbiter) { orbiterParts.push(o); return; }
+    discards.push(o); // tank or booster
+  });
+
+  // Side parts (boosters) vs central part (tank), by local X of geometry.
+  let maxAbsX = 0;
+  discards.forEach((m) => {
+    m.geometry.computeBoundingBox();
+    const c = m.geometry.boundingBox.getCenter(new THREE.Vector3());
+    m.userData.cx = c.x; m.userData.cz = c.z;
+    maxAbsX = Math.max(maxAbsX, Math.abs(c.x));
+  });
+  const xThresh = maxAbsX * 0.35;
+  discards.forEach((m, i) => {
+    const booster = Math.abs(m.userData.cx) > xThresh;
+    // Jettison direction in asset-local space (+Y = forward/nose, so -Y = aft).
+    const dir = new THREE.Vector3(
+      booster ? Math.sign(m.userData.cx || 1) * 1.3 : 0,
+      -1.0,
+      booster ? 0.1 : Math.sign(m.userData.cz || 1) * 0.2
+    ).normalize();
+    // Independent material so fading one part doesn't fade the orbiter.
+    m.material = Array.isArray(m.material) ? m.material.map((x) => x.clone()) : m.material.clone();
+    (Array.isArray(m.material) ? m.material : [m.material]).forEach((mm) => { mm.transparent = true; });
+    m.userData.entry = {
+      basePos: m.position.clone(),
+      baseRot: m.rotation.clone(),
+      dir,
+      spin: new THREE.Vector3((i % 3) - 1, ((i + 1) % 3) - 1, ((i + 2) % 3) - 1).multiplyScalar(3.2),
+      booster,
+    };
+  });
+
+  // Measure the orbiter portion of the stack (world/vehicle space) so the
+  // standalone orbiter model can be made to overlay it for a seamless swap.
+  const obox = new THREE.Box3();
+  orbiterParts.forEach((m) => obox.expandByObject(m));
+  const oCenter = obox.getCenter(new THREE.Vector3());
+  const oSize = obox.getSize(new THREE.Vector3());
+
+  // Normalise the orbiter model to match that portion.
+  orbiter.rotation.x = Math.PI / 2;
+  const ob0 = new THREE.Box3().setFromObject(orbiter);
+  const obSize = ob0.getSize(new THREE.Vector3());
+  const oScale = Math.max(oSize.x, oSize.y, oSize.z) / Math.max(obSize.x, obSize.y, obSize.z);
+  orbiter.scale.setScalar(oScale);
+  const ob1 = new THREE.Box3().setFromObject(orbiter);
+  const ob1Center = ob1.getCenter(new THREE.Vector3());
+  orbiter.position.add(oCenter.sub(ob1Center));
+  orbiter.visible = false;
+  orbiterRoot = orbiter;
+  vehicle.add(orbiterRoot);
+
+  updatePath(0);
+}
+
+function finishLoading() { loaderEl.classList.add("is-hidden"); }
 
 /* --- Scroll progress ------------------------------------------------------ */
 let progress = 0;
-ScrollTrigger.create({
-  trigger: ".content",
-  start: "top top",
-  end: "bottom bottom",
-  scrub: 1,
-  onUpdate: (self) => { progress = self.progress; },
-});
+function scrollProgress() {
+  const max = document.documentElement.scrollHeight - window.innerHeight;
+  return max > 0 ? clamp(window.scrollY / max, 0, 1) : 0;
+}
+function onScroll() {
+  progress = scrollProgress();
+  if (stackRoot) { updatePath(progress); renderer.render(scene, camera); }
+}
+window.addEventListener("scroll", onScroll, { passive: true });
 
-// Reveal text panels as they enter view.
-gsap.utils.toArray(".panel").forEach((panel) => {
-  gsap.from(panel.children, {
-    y: 40, opacity: 0, duration: 0.9, stagger: 0.08, ease: "power3.out",
-    scrollTrigger: { trigger: panel, start: "top 70%" },
-  });
-});
+const io = new IntersectionObserver((entries) => {
+  entries.forEach((e) => { if (e.isIntersecting) e.target.classList.add("is-in"); });
+}, { threshold: 0.3 });
+document.querySelectorAll(".panel").forEach((p) => io.observe(p));
+window.addEventListener("load", () => document.querySelector(".panel")?.classList.add("is-in"));
 
-/* --- HUD destination label ------------------------------------------------ */
+/* --- HUD ------------------------------------------------------------------ */
 const hud = document.getElementById("hud-label");
 const PHASES = [
-  [0.00, "DEPARTURE — LOW EARTH ORBIT"],
-  [0.20, "TRANSIT — EMISSION NEBULA"],
-  [0.45, "CROSSING — GALACTIC DISC"],
-  [0.70, "APPROACH — KEPLER-452b"],
+  [0.00, "IGNITION — LAUNCH PAD"],
+  [0.05, "ASCENT — MAX-Q"],
+  [0.12, "BOOSTER SEPARATION"],
+  [0.18, "EXTERNAL TANK JETTISON"],
+  [0.26, "ORBITAL INSERTION — LEAVING EARTH"],
+  [0.42, "TRANSIT — EMISSION NEBULA"],
+  [0.58, "CROSSING — GALACTIC DISC"],
+  [0.74, "APPROACH — KEPLER-452b"],
   [0.90, "FINAL DESCENT — TOUCHDOWN"],
 ];
 function updateHud(p) {
@@ -275,51 +334,75 @@ function updateHud(p) {
   if (hud && hud.textContent !== label) hud.textContent = label;
 }
 
-/* --- Path evaluation ------------------------------------------------------ *
- * Given scroll progress p in [0,1], place the shuttle along the route and put
- * the camera behind it. The last ~15% is the landing: the shuttle pitches up,
- * slows, and settles above the planet while the camera swings to a side view. */
+/* --- Path evaluation ------------------------------------------------------ */
 const camTarget = new THREE.Vector3();
-const tmp = new THREE.Vector3();
+const v1 = new THREE.Vector3();
 
 function updatePath(p) {
-  if (!shuttle) return;
+  if (!stackRoot) return;
 
-  const land = seg(p, 0.85, 1.0);          // 0 -> 1 across the landing
-  const fly = 1 - land;
+  const launch = seg(p, 0, P.ascentEnd);          // 0..1 over ascent
+  const boost = seg(p, P.boostA, P.boostB);        // booster separation
+  const tank = seg(p, P.tankA, P.tankB);           // tank jettison
+  const land = seg(p, P.landA, P.landB);
+  const launchLook = clamp(1 - p / P.tankB, 0, 1); // strong at the pad, gone by jettison
+  const cruiseAmt = seg(p, 0.30, 0.85);            // lateral weave envelope
 
-  // Forward travel eases to a stop as we land.
-  const zT = smooth(clamp(p / 0.85, 0, 1));
-  const z = lerp(PATH.startZ, PATH.endZ, zT);
+  // Continuous forward travel.
+  const z = lerp(PATH.startZ, PATH.endZ, smooth(p));
 
-  // Weaving flight; damped to zero during the landing.
-  const x = Math.sin(p * Math.PI * 3.0) * 9 * fly;
-  const y = Math.cos(p * Math.PI * 2.3) * 5 * fly + lerp(0, -4, land);
+  // Position: launch arc + cruise weave + landing settle.
+  const x = Math.sin(p * Math.PI * 3.0) * 9 * cruiseAmt;
+  const yLaunch = Math.sin(launch * Math.PI) * 4;  // gentle pitch-over arc
+  const yWeave = Math.cos(p * Math.PI * 2.3) * 5 * cruiseAmt;
+  const yLand = land * -4;
+  vehicle.position.set(x, yLaunch + yWeave + yLand, z);
 
-  shuttle.position.set(x, y, z);
+  // Attitude: bank/pitch while cruising; nose-up flare on landing.
+  const bank = Math.cos(p * Math.PI * 3.0) * 0.5 * cruiseAmt;
+  const pitch = Math.sin(p * Math.PI * 2.3) * 0.18 * cruiseAmt + land * 0.9
+    + (1 - launch) * 0.0; // (placeholder for any launch pitch)
+  vehicle.rotation.set(pitch, lerp(0, -0.25, land), bank);
 
-  // Attitude: bank into the weave while flying, then pitch nose-up to land.
-  const bank = Math.cos(p * Math.PI * 3.0) * 0.5 * fly;
-  const pitchFlight = Math.sin(p * Math.PI * 2.3) * 0.18 * fly;
-  const pitchLand = land * 0.9;            // nose-up flare
-  shuttle.rotation.set(pitchFlight + pitchLand, lerp(0, -0.25, land), bank);
+  // --- Model swap + separation -------------------------------------------
+  const swapped = p >= P.tankB;     // orbiter-only after jettison completes
+  stackRoot.visible = !swapped;
+  if (orbiterRoot) orbiterRoot.visible = swapped;
 
-  escort.position.set(x, y + 3, z + 6);
+  if (!swapped) {
+    discards.forEach((m) => {
+      const e = m.userData.entry;
+      const t = e.booster ? boost : tank;
+      const k = smooth(t);
+      m.position.copy(e.basePos).addScaledVector(e.dir, k * sepDist);
+      m.rotation.set(e.baseRot.x + e.spin.x * k, e.baseRot.y + e.spin.y * k, e.baseRot.z + e.spin.z * k);
+      const op = 1 - smooth(clamp((t - 0.6) / 0.4, 0, 1));   // fade over last 40%
+      const mats = Array.isArray(m.material) ? m.material : [m.material];
+      mats.forEach((mm) => { mm.opacity = op; });
+      m.visible = t < 1;
+    });
+  }
 
-  // Camera: chase from behind/above, then swing to a three-quarter side view
-  // so we watch the shuttle settle against the planet.
-  const chase = new THREE.Vector3(x, y + 3.2, z + 13);
+  // --- Escort light & camera ---------------------------------------------
+  escort.position.set(x, vehicle.position.y + 3, z + 6);
+
+  // Chase from behind/above; pull down/back at the pad to frame Earth; swing
+  // to a side view against Kepler-452b on landing.
+  const chase = v1.set(x, vehicle.position.y + 3.2, z + 13);
+  const launchCam = new THREE.Vector3(x + 5, vehicle.position.y + 1.5, z + 22);
   const sideView = new THREE.Vector3(
     PATH.planet.center.x + 26,
     PATH.planet.center.y + PATH.planet.radius + 20,
     z + 30
   );
-  camera.position.copy(chase).lerp(sideView, smooth(land));
+  camera.position.copy(chase).lerp(launchCam, launchLook).lerp(sideView, smooth(land));
 
-  // Look target blends from "ahead of the shuttle" to "the shuttle itself".
-  const ahead = tmp.set(x, y, z - 30);
-  camTarget.copy(ahead).lerp(shuttle.position, smooth(land));
-  camera.lookAt(camTarget);
+  // Look target: down toward Earth at launch, ahead while cruising, at the
+  // orbiter on landing.
+  const ahead = camTarget.set(x, vehicle.position.y, z - 30);
+  const earthward = new THREE.Vector3(x, vehicle.position.y - 9, z - 8);
+  ahead.lerp(earthward, launchLook).lerp(vehicle.position, smooth(land));
+  camera.lookAt(ahead);
 
   updateHud(p);
 }
@@ -328,13 +411,15 @@ function updatePath(p) {
 const clock = new THREE.Clock();
 function tick() {
   const t = clock.getElapsedTime();
+  progress = scrollProgress();
   updatePath(progress);
 
-  // Ambient life in the environments.
   nebula.children.forEach((c, i) => { c.rotation.z = t * 0.02 * (i % 2 ? 1 : -1); });
   galaxy.rotation.y = t * 0.04;
-  planet.rotation.y = t * 0.02;
-  clouds.rotation.y = t * 0.028;
+  earth.group.rotation.y = t * 0.03;
+  earth.clouds.rotation.y = t * 0.04;
+  kepler.group.rotation.y = t * 0.02;
+  kepler.clouds.rotation.y = t * 0.028;
 
   renderer.render(scene, camera);
   requestAnimationFrame(tick);
@@ -346,5 +431,13 @@ window.addEventListener("resize", () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
-  ScrollTrigger.refresh();
+  renderer.render(scene, camera);
 });
+
+/* Dev hook: force a synchronous render at a given progress (verification). */
+window.__renderAt = (p) => {
+  progress = clamp(p, 0, 1);
+  updatePath(progress);
+  renderer.render(scene, camera);
+  return { progress, hud: hud.textContent, swapped: !!(orbiterRoot && orbiterRoot.visible) };
+};
