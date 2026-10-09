@@ -123,6 +123,12 @@ h2.title { font-size: clamp(2.3rem, 6.4vw, 4.4rem); }
   opacity: calc(var(--tv) * 1); transform: translateY(0);
 }
 .panel--center .title:hover + .desc, .panel--center .title:focus + .desc { transform: translate(-50%, 0); }
+/* Position-aware: app.js adds .tip--up when the title is too low on screen for the note to open
+   below it, so it opens above instead (and the other way round when the title is high). */
+.tip--up .desc { top: auto; bottom: calc(100% + 3rem); transform: translateY(6px); }   /* 3rem clears the eyebrow line above the title */
+.panel--center .tip--up .desc { transform: translate(-50%, 6px); }
+.tip--up .title:hover + .desc, .tip--up .title:focus-visible + .desc, .tip--up .title:focus + .desc { transform: translateY(0); }
+.panel--center .tip--up .title:hover + .desc, .panel--center .tip--up .title:focus + .desc { transform: translate(-50%, 0); }
 
 @media (max-width: 720px) {
   .panel, .panel--right { max-width: 100%; align-items: flex-start; text-align: left; margin: 0; }

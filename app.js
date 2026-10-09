@@ -1406,15 +1406,37 @@ function makePadProps() {
   const g = new THREE.Group();
   const white = new THREE.MeshStandardMaterial({ color: 0xe9ebee, roughness: 0.45, metalness: 0.25 });
   const steel = new THREE.MeshStandardMaterial({ color: 0x8c939c, roughness: 0.6, metalness: 0.6 });
+  const dark = new THREE.MeshStandardMaterial({ color: 0x2a2e34, roughness: 0.7, metalness: 0.4 });
+  /* The 290-foot water tower: a four-legged steel truss, tapering, cross-braced
+   * at every level and ringed with girders, carrying the white tank on a
+   * platform with a catwalk rail and a ladder, and the fat deluge pipe down one
+   * side. (An earlier version was a ball on four sticks.) */
   const tower = new THREE.Group();
-  const tank = new THREE.Mesh(new THREE.SphereGeometry(1.0, 24, 16), white); tank.scale.set(1, 0.8, 1); tank.position.y = 7.7; tower.add(tank);
-  for (let i = 0; i < 4; i++) {
-    const a = i * Math.PI / 2 + Math.PI / 4;
-    const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.11, 7.4, 6), steel);
-    leg.position.set(Math.cos(a) * 0.62, 3.7, Math.sin(a) * 0.62); leg.rotation.set(Math.sin(a) * 0.05, 0, -Math.cos(a) * 0.05);
-    tower.add(leg);
+  const strut = (p0, p1, r, mat) => {
+    const d = new THREE.Vector3().subVectors(p1, p0), m = new THREE.Mesh(new THREE.CylinderGeometry(r, r, d.length(), 5), mat);
+    m.position.copy(p0).addScaledVector(d, 0.5); m.quaternion.setFromUnitVectors(UP, d.normalize()); return m;
+  };
+  const H = 6.6, bw = 1.5, tw = 0.9, levels = [0, 1.7, 3.3, 4.9, H];
+  const half = (y) => lerp(bw, tw, y / H);
+  const corner = (y, sx, sz) => new THREE.Vector3(sx * half(y), y, sz * half(y));
+  const signs = [[1, 1], [-1, 1], [-1, -1], [1, -1]];
+  for (const [sx, sz] of signs) tower.add(strut(corner(0, sx, sz), corner(H, sx, sz), 0.07, steel));
+  for (let l = 1; l < levels.length; l++) {
+    for (let k = 0; k < 4; k++) {
+      const [ax, az] = signs[k], [bx, bz] = signs[(k + 1) % 4];
+      tower.add(strut(corner(levels[l], ax, az), corner(levels[l], bx, bz), 0.04, steel));                   // girder ring
+      tower.add(strut(corner(levels[l - 1], ax, az), corner(levels[l], bx, bz), 0.025, steel));              // X bracing
+      tower.add(strut(corner(levels[l - 1], bx, bz), corner(levels[l], ax, az), 0.025, steel));
+    }
   }
-  const riser = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 7.4, 8), steel); riser.position.y = 3.7; tower.add(riser);
+  const plat = new THREE.Mesh(new THREE.CylinderGeometry(1.45, 1.45, 0.1, 20), steel); plat.position.y = H + 0.05; tower.add(plat);
+  const tank = new THREE.Mesh(new THREE.CapsuleGeometry(1.05, 1.0, 6, 22), white); tank.position.y = H + 1.55; tower.add(tank);
+  for (let k = 0; k < 16; k++) { const a1 = (k / 16) * Math.PI * 2; tower.add(strut(new THREE.Vector3(Math.cos(a1) * 1.4, H + 0.1, Math.sin(a1) * 1.4), new THREE.Vector3(Math.cos(a1) * 1.4, H + 0.65, Math.sin(a1) * 1.4), 0.015, steel)); }
+  const rail = new THREE.Mesh(new THREE.TorusGeometry(1.4, 0.018, 4, 24), steel); rail.rotation.x = Math.PI / 2; rail.position.y = H + 0.65; tower.add(rail);
+  const band = new THREE.Mesh(new THREE.CylinderGeometry(1.07, 1.07, 0.08, 22), new THREE.MeshStandardMaterial({ color: 0xc9412f, roughness: 0.6, metalness: 0.2 })); band.position.y = H + 1.55; tower.add(band);
+  tower.add(strut(corner(0, 1, 1).setX(bw + 0.05), corner(H, 1, 1).setX(tw + 0.05), 0.05, dark));                // ladder rail
+  const pipe = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.14, H, 8), steel); pipe.position.set(0, H / 2, 0); tower.add(pipe);   // deluge riser up the middle
+  for (const [sx, sz] of signs) { const foot = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.12, 0.3), dark); foot.position.set(sx * bw, 0.06, sz * bw); tower.add(foot); }
   tower.position.set(-15, Y_G, 13); g.add(tower);
   const lox = new THREE.Mesh(new THREE.SphereGeometry(1.25, 28, 18), white); lox.position.set(-13.5, Y_G + 1.5, -12.5); g.add(lox);
   const lh2 = new THREE.Mesh(new THREE.SphereGeometry(1.6, 28, 18), white); lh2.position.set(15.5, Y_G + 1.9, 10.5); g.add(lh2);
@@ -2194,8 +2216,10 @@ function setupVehicle(stack, orbiter) {
   normalize(orbiter, oSize.z, { x: 0, y: Math.PI / 2, z: 0 });
   orbiter.position.add(oMid);
   ORB_MID.copy(oMid);
-  orbiter.visible = false;
   orbiterRoot = orbiter; vehicle.add(orbiterRoot);
+  // both are made transparent once, here, so the crossfade never recompiles a shader
+  rememberOpacity(stackRoot); rememberOpacity(orbiterRoot);
+  orbiter.visible = false;
 }
 
 const _dq = new THREE.Quaternion(), _dq2 = new THREE.Quaternion(), _dp = new THREE.Vector3(), _dt = new THREE.Vector3(), _dk = new THREE.Vector3();
@@ -2572,6 +2596,22 @@ function updatePanels(y) {
   }
 }
 
+/* Hover notes open on whichever side of their title has room: below by default,
+ * above when the title is low on the screen (or the note would run into the HUD
+ * line at the bottom). Re-checked as the pointer moves, since the page scrolls
+ * under it. */
+const HUD_SAFE = 72;
+function placeTip(tip) {
+  const note = tip.querySelector(".desc"), title = tip.querySelector(".title");
+  if (!note || !title) return;
+  const t = title.getBoundingClientRect(), h = note.offsetHeight + 28;
+  const below = window.innerHeight - HUD_SAFE - t.bottom, above = t.top - 12;
+  tip.classList.toggle("tip--up", below < h && above > below);
+}
+for (const tip of document.querySelectorAll(".tip")) {
+  for (const ev of ["pointerenter", "pointermove", "focusin"]) tip.addEventListener(ev, () => placeTip(tip), { passive: true });
+}
+
 /* --- HUD ------------------------------------------------------------------- */
 const hud = document.getElementById("hud-label");
 const PHASES = [
@@ -2649,7 +2689,11 @@ function safeLookAt(target, upHint = UP) {
  * (a planet being passed, the horizon), the view direction is pulled back to
  * within `maxDeg` of the ship's visual centre. */
 const _vc = new THREE.Vector3(), _ad = new THREE.Vector3(), _sd = new THREE.Vector3(), _cq = new THREE.Quaternion();
-function shipCentre(out) { return out.copy(stackRoot && stackRoot.visible ? _zero3 : ORB_MID).applyMatrix4(vehicle.matrixWorld); }
+/* The point the camera keeps centred: the middle of the whole stack on the pad, sliding to the
+ * orbiter's own middle as the boosters and tank fall away (by progress: switching on which model
+ * happens to be showing jumped the target at the model swap). */
+let curP = 0;
+function shipCentre(out) { return out.copy(_zero3).lerp(ORB_MID, smooth(seg(curP, P.tankA - 0.02, P.tankA + 0.02))).applyMatrix4(vehicle.matrixWorld); }
 const _zero3 = new THREE.Vector3();
 function centreOnShip(look, maxDeg) {
   shipCentre(_vc);
@@ -2718,6 +2762,7 @@ function aimBias(look, shipPos, totalW, camPos = camera.position) {
 
 function updatePath(p) {
   if (!stackRoot) return;
+  curP = p;
   if (p >= FINALE_START && kepler) { finale(p); commonUpdates(p); return; }
   vehicle.scale.setScalar(1);
   const sp = shipP(clamp(p, 0, 1));
@@ -2737,9 +2782,9 @@ function updatePath(p) {
   const thrust = ignite * lerp(0.3, 1.25, climb) * (1 + 0.22 * Math.min(scrollVel * 9, 1));
   for (const q of plumes) q.live = q.kind === "srb" ? seg(p, LIFTOFF - 0.0006, LIFTOFF + 0.0004) * (1 - seg(p, P.boostA, P.boostA + 0.012)) : lerp(1, 0.3, seg(p, P.tankA, P.tankB));
   engines(p, thrust);
-  const swapped = p >= P.tankB;
-  stackRoot.visible = !swapped;
-  orbiterRoot.visible = swapped;
+  // the stack's orbiter hands over to the standalone one by a crossfade, not a pop
+  const sw = smooth(seg(p, P.tankB - 0.012, P.tankB + 0.008));
+  fadeGroup(stackRoot, 1 - sw); fadeGroup(orbiterRoot, sw);
 
   /* Camera. Launch rig: starts low beside the pad looking up at the stack with
    * the tower behind it, then rises past the ship so that from the cloud deck
@@ -2788,7 +2833,7 @@ function defaultUp(fwd, out) {
  * separate branches, and each seam was a single-frame snap: the camera rolling
  * 59 degrees onto the orbit, the ship turning 47 degrees onto the glide slope.) */
 function finale(p) {
-  stackRoot.visible = false; orbiterRoot.visible = true;
+  fadeGroup(stackRoot, 0); fadeGroup(orbiterRoot, 1);
   for (const q of plumes) q.live = q.kind === "srb" ? 0 : 0.3;
   let thrust = 0, kIn = smooth(seg(p, FINALE_START, FINALE_START + 0.012));
   thrust = 0.3 * (1 - seg(p, FINALE_START, FINALE_START + 0.008));      // the cruise glow dies away as the orbit is entered
