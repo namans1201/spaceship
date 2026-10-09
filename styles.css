@@ -94,6 +94,10 @@ body {
 }
 .title {
   font-weight: 800; line-height: 0.95; letter-spacing: -0.02em;
+  /* The gradient is clipped to the text, and to the element's box: with this line-height the box
+     ends above the descenders (the "g" in "Slingshot") and starts below the tops of tall letters.
+     Padding gives the clip room; the matching negative margin keeps the layout where it was. */
+  padding: 0.16em 0.08em; margin: -0.16em -0.08em;
   background: linear-gradient(100deg, var(--g1) 0%, var(--g2) 52%, var(--g3) 100%);
   -webkit-background-clip: text; background-clip: text; color: transparent;
   filter: drop-shadow(0 0 22px color-mix(in srgb, var(--g2) 45%, transparent)) drop-shadow(0 6px 30px rgba(0, 0, 0, 0.55));
@@ -132,6 +136,10 @@ h2.title { font-size: clamp(2.3rem, 6.4vw, 4.4rem); }
 
 @media (max-width: 720px) {
   .panel, .panel--right { max-width: 100%; align-items: flex-start; text-align: left; margin: 0; }
+  /* The ship is held at the centre of the screen, so on a phone the text rides in the upper part,
+     clear of it (the opening headline stays low, where the pad is). */
+  .panel:not(.panel--intro) { justify-content: flex-start; padding-top: 15vh; }
+  .panel:not(.panel--intro)::before { top: 28%; }
   .panel--center { align-items: center; text-align: center; }
   .panel--right .desc { left: 0; right: auto; }
   .panel::before, .panel--left::before, .panel--right::before { left: 50%; }

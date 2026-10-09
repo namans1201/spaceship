@@ -34,7 +34,7 @@ import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
 import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
 import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
-import { mergeVertices } from "three/addons/utils/BufferGeometryUtils.js";
+import { mergeVertices, mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { makeKSCBuildings } from "./lib/ksc.js";
 import { spiralGalaxyTexture, edgeOnGalaxyTexture, ellipticalGalaxyTexture, nebulaTexture } from "./lib/deepsky.js";
 
@@ -56,6 +56,8 @@ const MOONURL = {
   io: "Jupiter - Io (A)/Jupiter - Io (A).jpg", europa: "Jupiter - Europa/Jupiter - Europa.jpg",
   ganymede: "Jupiter - Ganymede/Jupiter - Ganymede.jpg", callisto: "Jupiter - Callisto/Jupiter - Callisto.jpg",
   titan: "Saturn - Titan/Saturn - Titan.jpg", enceladus: "Saturn - Enceladus/Saturn - Enceladus.jpg",
+  rhea: "Saturn - Rhea/Saturn - Rhea.jpg", dione: "Saturn - Dione/Saturn - Dione.jpg", tethys: "Saturn - Tethys/Saturn - Tethys.jpg",
+  mimas: "Saturn - Mimas/Saturn - Mimas.jpg", iapetus: "Saturn - Iapetus/Saturn - Iapetus.jpg",
   triton: "Neptune - Triton/Neptune - Triton.jpg", charon: "Pluto - Charon/Pluto - Charon.jpg",
 };
 const MODEL = {
@@ -67,6 +69,17 @@ const MODEL = {
   dish: U("3D Models/Deep Space Network 34-meter/Deep Space Network 34-meter.glb"),
   ship2: U("models/Spaceship.glb"),
   hq: U("3D Models/Headquarters Building/Headquarters Building.glb"),
+  // the library's craft: ISS (A) is the light one (6.6k triangles; (B) is 174k), the rest are baked on load
+  iss: U("3D Models/International Space Station (ISS) (A)/International Space Station (ISS) (A).glb"),
+  hubble: U("3D Models/Hubble Space Telescope (A)/Hubble Space Telescope (A).glb"),
+  lm: U("3D Models/Apollo Lunar Module/Apollo Lunar Module.glb"),
+  bennu: U("3D Models/1999 RQ36 asteroid/1999 RQ36 asteroid.glb"),
+  dawn: U("3D Models/Dawn/Dawn.glb"),
+  galileo: U("3D Models/Galileo/Galileo.glb"),
+  cassini: U("3D Models/Cassini-Huygens (A)/Cassini-Huygens (A).glb"),
+  astro: U("3D Models/Astronaut/Astronaut.glb"),
+  dish70: U("3D Models/Deep Space Network 70-meter/Deep Space Network 70-meter.glb"),
+  ares: U("3D Models/Ares 1 (A)/Ares 1 (A).glb"),
 };
 
 /* --- Math ----------------------------------------------------------------- */
@@ -1117,14 +1130,14 @@ const GLSL_RING = /* glsl */ `
  * 1 = rocky (cratered relief and mottling, as bump and albedo), 2 = banded gas
  * giant (turbulent streaks along the belts). It is computed in object space,
  * so it has no seam or pole pinch. */
-function planetMaterial({ map = null, color = 0xffffff, rim = 0x000000, rimK = 0, limb = 0, band = 0, ring = null, kind = 0, detailFreq = 6 }) {
+function planetMaterial({ map = null, color = 0xffffff, rim = 0x000000, rimK = 0, limb = 0, band = 0, ring = null, kind = 0, detailFreq = 6, maria = 0 }) {
   return new THREE.ShaderMaterial({
     uniforms: {
       uMap: { value: map }, uHasMap: { value: map ? 1 : 0 }, uColor: { value: new THREE.Color(color) },
       uSunDir: { value: sunDir }, uRim: { value: new THREE.Color(rim) }, uRimK: { value: rimK }, uLimb: { value: limb }, uBand: { value: band },
       uOpacity: { value: 1 }, uCenter: { value: new THREE.Vector3() }, uRingN: { value: new THREE.Vector3(0, 1, 0) },
       uRing: { value: new THREE.Vector2(ring ? ring[0] : 0, ring ? ring[1] : 0) }, uRingOn: { value: ring ? 1 : 0 }, uAlbedo: { value: 1 },
-      uSoft: { value: 0 }, uKind: { value: kind }, uFreq: { value: detailFreq }, uBumpA: { value: 0.1 },
+      uSoft: { value: 0 }, uKind: { value: kind }, uFreq: { value: detailFreq }, uBumpA: { value: 0.1 }, uMaria: { value: maria },
     },
     vertexShader: /* glsl */ `
       varying vec2 vUv; varying vec3 vN; varying vec3 vWP; varying vec3 vO;
@@ -1135,7 +1148,7 @@ function planetMaterial({ map = null, color = 0xffffff, rim = 0x000000, rimK = 0
     fragmentShader: /* glsl */ `
       uniform sampler2D uMap; uniform float uHasMap; uniform vec3 uColor; uniform vec3 uSunDir; uniform vec3 uRim; uniform float uRimK;
       uniform float uLimb; uniform float uBand; uniform float uOpacity; uniform vec3 uCenter; uniform vec3 uRingN; uniform vec2 uRing; uniform float uRingOn; uniform float uAlbedo;
-      uniform float uSoft; uniform int uKind; uniform float uFreq; uniform float uBumpA;
+      uniform float uSoft; uniform int uKind; uniform float uFreq; uniform float uBumpA; uniform float uMaria;
       varying vec2 vUv; varying vec3 vN; varying vec3 vWP; varying vec3 vO;
       ${GLSL_NOISE}
       ${GLSL_RING}
@@ -1167,6 +1180,14 @@ function planetMaterial({ map = null, color = 0xffffff, rim = 0x000000, rimK = 0
           uv += detail * vec2(w.x * 0.012 + shear * 0.002, w.y * 0.0045);
         }
         vec3 alb = (uHasMap > 0.5 ? texture2D(uMap, uv, uSoft * 3.5).rgb : uColor) * uAlbedo;
+        if (uMaria > 0.5) {
+          // the Moon: the stand-in map (Rhea) pulled to lunar grey, with dark basalt seas
+          // (maria) across a third of the face and a few bright ray craters
+          float lumM = dot(alb, vec3(0.3, 0.59, 0.11));
+          alb = mix(vec3(lumM), alb, 0.12) * vec3(1.02, 1.0, 0.96);
+          float sea = smoothstep(0.47, 0.57, fbm3l(vO * 1.35 + vec3(4.0, 1.0, 2.0)));
+          alb *= 1.0 - 0.6 * sea * (0.6 + 0.4 * vn3(vO * 7.0));
+        }
         if (uKind == 2) {
           vec3 q = vO * uFreq;
           float streak = fbm3(vec3(q.x * 1.5, vO.y * uFreq * 26.0 + fbm3(q * 3.0) * 2.5, q.z * 1.5));
@@ -1391,6 +1412,7 @@ function makeEarth(dayTex) {
 let gantry = null, crawler = null;
 const GANTRY = { scale: 0.516, deckTop: 1.26, deckC: new THREE.Vector2(0.73, -1.885), ground: -1.39, rotY: -2.498 };
 function placeGantry(root, tailY) {
+  root = bake(root);                       // a few draw calls instead of hundreds (same geometry, same space)
   gantry = new THREE.Group(); gantry.add(root);
   gantry.scale.setScalar(GANTRY.scale);
   gantry.rotation.y = GANTRY.rotY;
@@ -1437,7 +1459,8 @@ function makePadProps() {
   tower.add(strut(corner(0, 1, 1).setX(bw + 0.05), corner(H, 1, 1).setX(tw + 0.05), 0.05, dark));                // ladder rail
   const pipe = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.14, H, 8), steel); pipe.position.set(0, H / 2, 0); tower.add(pipe);   // deluge riser up the middle
   for (const [sx, sz] of signs) { const foot = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.12, 0.3), dark); foot.position.set(sx * bw, 0.06, sz * bw); tower.add(foot); }
-  tower.position.set(-15, Y_G, 13); g.add(tower);
+  const towerBaked = bake(tower);          // ~150 struts -> a handful of draw calls
+  towerBaked.position.set(-15, Y_G, 13); g.add(towerBaked);
   const lox = new THREE.Mesh(new THREE.SphereGeometry(1.25, 28, 18), white); lox.position.set(-13.5, Y_G + 1.5, -12.5); g.add(lox);
   const lh2 = new THREE.Mesh(new THREE.SphereGeometry(1.6, 28, 18), white); lh2.position.set(15.5, Y_G + 1.9, 10.5); g.add(lh2);
   for (const [sph, r] of [[lox, 1.25], [lh2, 1.6]]) {
@@ -1457,13 +1480,12 @@ let kscGroup = null, countdown = null;
 const CW_YAW = -0.559;   // the crawlerway's heading: -X turned toward the north-west (matches terrainEarth's frame)
 function makeKSC() {
   const ksc = makeKSCBuildings({ groundY: 0 });
-  kscGroup = ksc.group;
+  countdown = ksc.parts.clock; scene.add(countdown);      // out of the group first: it is animated, the buildings are not
+  kscGroup = bake(ksc.group);
   // at the far end of the crawlerway, which runs west-north-west (CW_YAW), doors to the pad
   kscGroup.position.set(-140 * Math.cos(CW_YAW), Y_G, 140 * Math.sin(CW_YAW));
   kscGroup.rotation.y = CW_YAW;
   scene.add(kscGroup);
-  countdown = ksc.parts.clock;
-  scene.add(countdown);
   countdown.position.set(0.4, Y_G, 10.7);
   countdown.rotation.y = Math.atan2(14 - 0.4, 17 - 10.7);   // face the opening camera
   countdown.scale.setScalar(1.3);
@@ -1482,6 +1504,7 @@ function shipP(p) {
 }
 function missionTime(p) { return p < 0.008 ? -10 + (p / 0.008) * 10 : (p - 0.008) * (124 / (P.boostA - 0.008)); }
 function placeCrawler(root) {
+  root = bake(root);
   crawler = new THREE.Group(); crawler.add(root);
   crawler.scale.setScalar(0.407);
   crawler.position.set(-26, Y_G + 0.22 * 0.407, -1.7).applyAxisAngle(UP, CW_YAW);
@@ -1496,7 +1519,7 @@ function placeCrawler(root) {
  * real order (Jupiter > Saturn > Uranus ~ Neptune > Mars > Moon > Pluto).
  * `glint` is the colour of the body as a point of light, before it resolves. */
 const BODY_DEFS = [
-  { key: "moon", pos: [40, 14, -220], r: 18, tex: "moon", spin: 0.02, mode: "around", limb: 0.15, albedo: 0.62, kind: 1, freq: 7, glint: 0xdcdcdc },
+  { key: "moon", pos: [40, 14, -220], r: 18, tex: "moon", spin: 0, mode: "around", limb: 0.15, albedo: 0.6, kind: 1, freq: 7, glint: 0xdcdcdc, maria: 1 },
   { key: "mars", pos: [-40, 12, -345], r: 22, tex: "mars", spin: 0.05, mode: "below", rim: 0xe0a080, rimK: 0.3, kind: 1, freq: 5, glint: 0xffa070 },
   { key: "jupiter", pos: [46, -14, -610], r: 48, tex: "jupiter", spin: 0.03, mode: "around", limb: 0.55, band: 0.1, rim: 0xe6d2a8, rimK: 0.12, kind: 2, freq: 3, glint: 0xf2d6ae },
   { key: "saturn", pos: [-70, 20, -870], r: 38, tex: "saturn", spin: 0.03, ring: [50, 86], mode: "rings", limb: 0.5, band: 0.06, kind: 2, freq: 3, glint: 0xf6e2b4 },
@@ -1518,6 +1541,11 @@ const MINOR_DEFS = [
   { key: "ganymede", parent: "jupiter", off: [35, 10, -125], r: 5.4, tex: "ganymede", kind: 1, freq: 6, glint: 0xd8d0c4 },
   { key: "callisto", parent: "jupiter", off: [110, -8, -120], r: 5.0, tex: "callisto", kind: 1, freq: 6, glint: 0xa89c8c },
   { key: "titan", parent: "saturn", ringOff: [170, -90], r: 5.2, tex: "titan", kind: 0, glint: 0xf0c070 },
+  { key: "rhea", parent: "saturn", ringOff: [-110, -120], r: 3.4, tex: "rhea", kind: 1, freq: 6, glint: 0xdcdcdc },
+  { key: "dione", parent: "saturn", ringOff: [150, 95], r: 3.0, tex: "dione", kind: 1, freq: 6, glint: 0xe6e6e6 },
+  { key: "tethys", parent: "saturn", ringOff: [60, 115], r: 2.8, tex: "tethys", kind: 1, freq: 6, glint: 0xf0f0f0 },
+  { key: "mimas", parent: "saturn", ringOff: [-40, -100], r: 1.9, tex: "mimas", kind: 1, freq: 8, glint: 0xd0d0d0 },
+  { key: "iapetus", parent: "saturn", ringOff: [260, -60], r: 3.2, tex: "iapetus", kind: 1, freq: 6, glint: 0xc8c0b0 },
   { key: "enceladus", parent: "saturn", ringOff: [110, -20], r: 1.9, tex: "enceladus", kind: 1, freq: 7, glint: 0xffffff, albedo: 1.1 },
   { key: "triton", parent: "neptune", off: [-30, -18, -52], r: 4, tex: "triton", kind: 1, freq: 6, glint: 0xf0dcd4 },
   { key: "charon", parent: "pluto", off: [26, -3, -9], r: 4, tex: "charon", kind: 1, freq: 7, glint: 0xc8c0b8 },
@@ -1548,7 +1576,7 @@ const bodies = {};
 const textures = {};
 function makeBody(def, minor = false) {
   const g = new THREE.Group();
-  const mat = planetMaterial({ map: textures[def.tex] || null, color: def.color || 0xffffff, rim: def.rim || 0, rimK: def.rimK || 0, limb: def.limb || 0, band: def.band || 0, ring: def.ring, kind: def.kind || 0, detailFreq: def.freq || 6 });
+  const mat = planetMaterial({ map: textures[def.tex] || null, color: def.color || 0xffffff, rim: def.rim || 0, rimK: def.rimK || 0, limb: def.limb || 0, band: def.band || 0, ring: def.ring, kind: def.kind || 0, detailFreq: def.freq || 6, maria: def.maria || 0 });
   if (def.albedo) mat.uniforms.uAlbedo.value = def.albedo;
   mat.uniforms.uBumpA.value = def.r * 0.012 / Math.max(1, (def.freq || 6) / 6);   // relief height in world units
   const res = minor ? [48, 32] : [128, 96];
@@ -2429,6 +2457,7 @@ function updateBaseDust(p) {
 /* Base modules arrive in the background after the main load. Placement is in
  * the landing frame: x along the approach, z to the side, y up. */
 function placeOnBase(root, size, x, z, rotY, axis = "max") {
+  root = bake(root);
   const box = new THREE.Box3().setFromObject(root), s = box.getSize(new THREE.Vector3());
   const k = size / (axis === "max" ? Math.max(s.x, s.y, s.z) : s[axis]);
   root.scale.setScalar(k);
@@ -2438,6 +2467,7 @@ function placeOnBase(root, size, x, z, rotY, axis = "max") {
   holder.position.set(x, 0, z); holder.rotation.y = rotY;
   base.add(holder);
   rememberOpacity(holder);
+  return holder;
 }
 
 /* --- Loading --------------------------------------------------------------- */
@@ -2467,7 +2497,7 @@ Promise.all([
   makeEarth(earth);
   BODY_DEFS.forEach((d) => makeBody(d));
   MINOR_DEFS.forEach((d) => makeBody(d, true));
-  glints = makeSpriteBatch({ count: 24, map: spriteTexture("glint", 5, 128), additive: true, renderOrder: FX_ORDER });
+  glints = makeSpriteBatch({ count: 40, map: spriteTexture("glint", 5, 128), additive: true, renderOrder: FX_ORDER });
   scene.add(glints.mesh);
   makeStar();
   buildKeplerFrame();
@@ -2510,10 +2540,147 @@ Promise.all([
   loaderEl.classList.add("is-hidden");
   loadBase();
   loadMoons();
+  loadExtras();
 }).catch((err) => {
   console.error("Asset load failed:", err);
   if (pctEl) pctEl.parentElement.textContent = "Could not load assets - serve over http (see README).";
 });
+
+/* --- Library models: craft, asteroids, astronauts, a rocket ------------------ *
+ * Added from the NASA model library after a cost/benefit pass: each is loaded
+ * after the opening is up, baked into a handful of draw calls (merged by
+ * material), and only drawn inside its own window of the voyage. Far off, each
+ * is small and grows as the ship closes, like the planets (bodyScale). */
+function bake(root) {
+  root.updateMatrixWorld(true);
+  const inv = new THREE.Matrix4().copy(root.matrixWorld).invert(), m4 = new THREE.Matrix4();
+  const groups = new Map(), kept = [];
+  root.traverse((o) => {
+    if (!o.isMesh || o.isSkinnedMesh) return;
+    for (let n = o; n && n !== root.parent; n = n.parent) if (!n.visible) return;     // helper meshes stay hidden
+    if (Array.isArray(o.material)) {            // multi-material meshes are kept whole
+      const keepMesh = new THREE.Mesh(o.geometry, o.material);
+      m4.multiplyMatrices(inv, o.matrixWorld); keepMesh.applyMatrix4(m4); kept.push(keepMesh); return;
+    }
+    let g = o.geometry.clone();
+    m4.multiplyMatrices(inv, o.matrixWorld); g.applyMatrix4(m4);
+    const keep = ["position", "normal", "uv"];
+    if (o.material.vertexColors && g.attributes.color) keep.push("color");
+    for (const k of Object.keys(g.attributes)) if (!keep.includes(k)) g.deleteAttribute(k);
+    g.morphAttributes = {};
+    if (!g.attributes.uv) g.setAttribute("uv", new THREE.Float32BufferAttribute(new Float32Array(g.attributes.position.count * 2), 2));
+    if (g.index) g = g.toNonIndexed();
+    if (!g.attributes.normal) g.computeVertexNormals();
+    const k = o.material.uuid;
+    if (!groups.has(k)) groups.set(k, { mat: o.material, geos: [] });
+    groups.get(k).geos.push(g);
+  });
+  const out = new THREE.Group();
+  for (const { mat, geos } of groups.values()) {
+    const merged = geos.length > 1 ? mergeGeometries(geos, false) : geos[0];
+    if (!merged) { for (const g of geos) out.add(new THREE.Mesh(g, mat)); continue; }
+    merged.computeBoundingSphere();
+    out.add(new THREE.Mesh(merged, mat));
+  }
+  for (const k of kept) out.add(k);
+  return out;
+}
+/* Normalise: centred (or standing on its base), longest side == size. */
+function fitModel(root, size, stand = false) {
+  const box = new THREE.Box3().setFromObject(root), s = box.getSize(new THREE.Vector3()), c = box.getCenter(new THREE.Vector3());
+  const k = size / Math.max(s.x, s.y, s.z);
+  const holder = new THREE.Group(), inner = new THREE.Group();
+  inner.add(root); inner.scale.setScalar(k);
+  inner.position.set(-c.x * k, stand ? -box.min.y * k : -c.y * k, -c.z * k);
+  holder.add(inner);
+  return holder;
+}
+const extras = [];
+const _xv = new THREE.Vector3(), _xr = new THREE.Vector3(), _xt = new THREE.Vector3();
+/* A craft the ship passes: fixed in space beside the path, seen small from afar and
+ * growing on approach, drifting slowly. (ahead, side, up) are measured from the
+ * ship's position at p0, along its heading, to its right and upward. */
+function addFlyby(key, root, { size, p0, w = 0.03, ahead, side, up, spin = 0.15, phase = 0 }) {
+  const holder = fitModel(bake(root), size);
+  const P = path.getPoint(p0, new THREE.Vector3()); safeTangent(p0, _xt); rightOf(_xt, _xr);
+  holder.position.copy(P).addScaledVector(_xt, ahead).addScaledVector(_xr, side).addScaledVector(UP, up);
+  holder.rotation.set(phase * 0.7, phase, phase * 0.4);
+  holder.visible = false; scene.add(holder);
+  extras.push({ key, holder, p0, w, dClose: Math.hypot(side, up) + 10, spin, phase });
+}
+/* An Earth-orbit craft: it hangs at a fixed height over Earth as the planet shrinks. It is
+ * placed where the climbing ship rises through that height (at p0), a little to one side,
+ * so the ship passes it close by and then leaves it behind and below. */
+function addOrbiter(key, root, { size, p0, side, up = 0, w = 0.032, spin }) {
+  const holder = fitModel(bake(root), size);
+  earthAt(p0);
+  const S = path.getPoint(p0, new THREE.Vector3()), C = earthC.clone(), R = earthR;
+  const alt = (S.distanceTo(C) - R) / R + up / R;
+  const dir = S.sub(C).normalize(); safeTangent(p0, _xt);
+  dir.applyAxisAngle(_xt, side / (R * (1 + alt)));                    // slide it sideways, round the planet
+  holder.visible = false; scene.add(holder);
+  extras.push({ key, holder, p0, w, dClose: Math.abs(side) + 12, earth: true, dir, alt, spin });
+}
+function updateExtras(p) {
+  for (const e of extras) {
+    let win = Math.min(seg(p, e.p0 - e.w, e.p0 - e.w * 0.4), 1 - seg(p, e.p0 + e.w * 0.4, e.p0 + e.w));
+    if (e.earth) win *= smooth(seg(shipAlt, 0.9, 1.6));          // not until the ship is out of the blue sky
+    if (win <= 0.005) { e.holder.visible = false; continue; }
+    if (e.earth) {
+      e.holder.position.copy(e.dir).multiplyScalar(earthR * (1 + e.alt)).add(earthC);
+      e.holder.quaternion.setFromUnitVectors(UP, e.dir);
+      e.holder.rotateY(elapsed * e.spin);
+    } else {
+      e.holder.rotation.y = e.phase + elapsed * e.spin;
+    }
+    const sc = bodyScale(camera.position.distanceTo(e.holder.position) / e.dClose) * smooth(win);
+    e.holder.visible = sc > 0.03;
+    e.holder.scale.setScalar(sc);
+  }
+  if (ares) {
+    // Ares 1 stands on the next pad, 39B, a few kilometres up the coast; the ground
+    // curves away beneath it as the planet shrinks, like the buildings
+    const on = p < 0.11;
+    ares.visible = on;
+    if (on) ares.position.y = Y_G - (ares.position.x * ares.position.x + ares.position.z * ares.position.z) / (2 * earthR);
+  }
+}
+let ares = null;
+function loadExtras() {
+  const L = (u) => loadGlb(u, lateLoader);
+  Promise.all([L(MODEL.iss), L(MODEL.hubble), L(MODEL.lm), L(MODEL.bennu), L(MODEL.dawn), L(MODEL.galileo), L(MODEL.cassini), L(MODEL.astro), L(MODEL.dish70), L(MODEL.ares)])
+    .then(([iss, hubble, lm, bennu, dawn, galileo, cassini, astro, dish70, aresG]) => {
+      // low Earth orbit: the ISS and Hubble, below and to the side of the climb
+      addOrbiter("iss", iss.scene, { size: 8, p0: 0.152, side: -26, up: 3, spin: 0.05 });
+      addOrbiter("hubble", hubble.scene, { size: 4.5, p0: 0.166, side: -30, up: -2, spin: 0.08 });
+      // the Moon: an Apollo lunar module on the surface, on the side that faces the approach
+      const moon = bodies.moon, mcam = path.getPoint(0.29, new THREE.Vector3()).add(new THREE.Vector3(0, 6, 22));
+      const nrm = mcam.sub(moon.pos).normalize(), lmH = fitModel(bake(lm.scene), 2.4, true);
+      lmH.position.copy(nrm).multiplyScalar(moon.r - 0.1);
+      lmH.quaternion.setFromUnitVectors(UP, nrm);
+      moon.mesh.add(lmH); moon.lm = lmH;
+      // the asteroid belt: Bennu, three times over, and Dawn, which really orbited Vesta and Ceres
+      const bennuBase = bake(bennu.scene);
+      [[0.352, 5, 80, 18, 8, 0.4], [0.366, 3.4, 80, -14, -4, 1.7], [0.378, 4.2, 80, -22, -1, 3.1]].forEach(([p0, size, ahead, side, up, ph], i) => {
+        const r = new THREE.Group(); r.add(bennuBase.clone());
+        addFlyby("bennu" + i, r, { size, p0, w: 0.04, ahead, side, up, spin: 0.09 + i * 0.03, phase: ph });
+      });
+      addFlyby("dawn", dawn.scene, { size: 6.5, p0: 0.364, w: 0.04, ahead: 80, side: 14, up: 2, spin: 0.12, phase: 0.6 });
+      addFlyby("galileo", galileo.scene, { size: 6, p0: 0.412, w: 0.04, ahead: 70, side: -24, up: 2, spin: 0.1, phase: 2.0 });
+      addFlyby("cassini", cassini.scene, { size: 5.5, p0: 0.462, w: 0.034, ahead: 50, side: -7, up: 3, spin: 0.1, phase: 1.1 });
+      // Ares 1 on pad 39B
+      ares = fitModel(bake(aresG.scene), 10, true);
+      ares.position.set(-42, Y_G, -118); scene.add(ares);   // pad 39B, pulled in from its real 2.6 km to frame the opening
+      // Base One: two astronauts for scale and the big 70 m dish behind the 34 m one
+      if (base) {
+        placeOnBase(bake(astro.scene), 0.56, 8.2, 6.3, 2.6);
+        placeOnBase(bake(astro.scene), 0.56, 3.0, 6.9, 3.4);
+        placeOnBase(bake(dish70.scene), 9.5, -15, -30, 0.5, "y");
+            }
+      renderer.compile(scene, camera);          // every new shader, now, while nothing is moving
+    }).catch((e) => console.warn("Library models failed to load:", e));
+}
+
 const lateTex = new THREE.TextureLoader();
 function loadMoons() {
   for (const [key, file] of Object.entries(MOONURL)) {
@@ -2608,6 +2775,11 @@ function placeTip(tip) {
   const below = window.innerHeight - HUD_SAFE - t.bottom, above = t.top - 12;
   tip.classList.toggle("tip--up", below < h && above > below);
 }
+[...document.querySelectorAll(".tip")].forEach((tip, i) => {
+  // tie each note to its title for screen readers (the note is hidden until hover or focus)
+  const note = tip.querySelector(".desc"), title = tip.querySelector(".title");
+  if (note && title) { note.id = "tip-" + i; title.setAttribute("aria-describedby", note.id); }
+});
 for (const tip of document.querySelectorAll(".tip")) {
   for (const ev of ["pointerenter", "pointermove", "focusin"]) tip.addEventListener(ev, () => placeTip(tip), { passive: true });
 }
@@ -2650,7 +2822,7 @@ const lastTan = new THREE.Vector3(0, 0, -1);
 const _shipRight = new THREE.Vector3(), _shipUp = new THREE.Vector3(), _refUp = new THREE.Vector3(), _basis = new THREE.Matrix4();
 const _launch = new THREE.Vector3(), _bias = new THREE.Vector3(), _side = new THREE.Vector3(), _q = new THREE.Quaternion();
 const ALT_UP = new THREE.Vector3(0, 0, 1);
-const _away = new THREE.Vector3(), _cd = new THREE.Vector3();
+const _away = new THREE.Vector3(), _cd = new THREE.Vector3(), _swing = new THREE.Vector3(), _sw1 = new THREE.Vector3();
 function rightOf(t, out) { out.crossVectors(t, UP); if (out.lengthSq() < 1e-6) out.set(1, 0, 0); return out.normalize(); }
 /* Ship attitude as an explicit basis: x = right, y = up, z = nose. Near-vertical
  * flight blends the reference up toward +Z so the cross products stay well
@@ -2731,21 +2903,29 @@ function engines(p, thrust) {
  * Never ahead of the ship: the forward part of the swing is dropped. Shared by
  * the cruise and the finale, so the hand-over between them has no seam.
  * Returns the total weight of the bodies in play (featPos is their centroid). */
+const satW = (w) => Math.tanh(w * 1.3) / Math.tanh(1.3);   // smooth stand-in for min(w, 1): no kink in the camera's speed
 function swingChase(p, shipPos, tan, camPos) {
-  let totalW = 0; featPos.set(0, 0, 0);
+  let totalW = 0; featPos.set(0, 0, 0); _swing.set(0, 0, 0);
   for (const f of FEATURES) {
     if (!f.pos) continue;
     const d = Math.abs(p - f.pAt); if (d >= f.w) continue;
     const wgt = f.strength * smooth(1 - d / f.w);
     featPos.addScaledVector(f.pos, wgt); totalW += wgt;
+    // each body contributes its own "away" direction (blended by weight): taking the direction
+    // away from the weighted centroid instead made the camera whip round when two bodies
+    // overlapped (the centroid sweeps across the sky as one fades out and the next fades in)
+    _sw1.subVectors(shipPos, f.pos).normalize(); _sw1.addScaledVector(tan, -Math.max(0, _sw1.dot(tan)));
+    _swing.addScaledVector(_sw1, wgt);
   }
   if (totalW > 0) {
     featPos.multiplyScalar(1 / totalW);
-    const k = Math.min(totalW, 1) * 0.8;
-    _away.subVectors(shipPos, featPos).normalize(); _away.addScaledVector(tan, -Math.max(0, _away.dot(tan)));
-    const al = _away.length();                                   // ~0 if the body is dead astern: no side to swing to
+    const k = satW(totalW) * 0.8;
+    const al = _swing.length() / totalW;                      // ~0 if the bodies are dead astern or cancel out: no side to swing to
     _cd.subVectors(camPos, shipPos); const dist = _cd.length(); _cd.multiplyScalar(1 / dist);
-    if (al > 1e-3) _cd.multiplyScalar(1 - k * smooth(clamp(al / 0.3, 0, 1))).addScaledVector(_away.multiplyScalar(1 / al), k * smooth(clamp(al / 0.3, 0, 1))).normalize();
+    if (al > 1e-3) {
+      const wk = k * smooth(clamp(al / 0.8, 0, 1));
+      _cd.multiplyScalar(1 - wk).addScaledVector(_swing.multiplyScalar(1 / (al * totalW)), wk).normalize();
+    }
     const fw = _cd.dot(tan); if (fw > -0.3) _cd.addScaledVector(tan, -0.3 - fw).normalize();
     camPos.copy(shipPos).addScaledVector(_cd, dist);
   }
@@ -2754,15 +2934,23 @@ function swingChase(p, shipPos, tan, camPos) {
 /* ...and a touch of aim toward them, within the centring limit applied later. */
 function aimBias(look, shipPos, totalW, camPos = camera.position) {
   if (totalW <= 0) return;
-  _bias.copy(featPos).sub(look).multiplyScalar(Math.min(totalW, 1));
+  _bias.copy(featPos).sub(look).multiplyScalar(satW(totalW));
   const maxBias = camPos.distanceTo(shipPos) * 0.22;
   if (_bias.length() > maxBias) _bias.setLength(maxBias);
   look.add(_bias);
 }
 
+/* The Earth feature the camera glances back at must be where Earth is for THIS p. It was
+ * being updated at the end of the frame, after the camera used it, so the camera lagged a
+ * frame behind and its position depended on the path taken to reach a point. */
+function syncEarthFeature(p) {
+  earthAt(Math.min(p, 0.3));
+  EARTH_FEATURE.pos.copy(earthC);
+}
 function updatePath(p) {
   if (!stackRoot) return;
   curP = p;
+  syncEarthFeature(p);
   if (p >= FINALE_START && kepler) { finale(p); commonUpdates(p); return; }
   vehicle.scale.setScalar(1);
   const sp = shipP(clamp(p, 0, 1));
@@ -2927,7 +3115,6 @@ function commonUpdates(p) {
   earthAt(Math.min(p, 0.3));
   if (earthGroup) {
     earthGroup.position.copy(earthC); earthGroup.scale.setScalar(earthR);
-    EARTH_FEATURE.pos.copy(earthC);   // the camera swings up off the planet's centre: looking down on the ship, Earth below
     const shipD = vehicle.position.distanceTo(earthC) - earthR;
     shipAlt = shipD / (ATM_T * earthR);
     const detail = 1 - smooth(seg(earthR, 5200, 2600));
@@ -3031,13 +3218,14 @@ function commonUpdates(p) {
     }
   }
   if (localStars) { localStars.material.uniforms.uOpacity.value = 0.6 * (1 - day) * (1 - seg(p, 0.985, 1)); localStars.visible = localStars.material.uniforms.uOpacity.value > 0.01; }
+  updateExtras(p);
   updateDebris(p);
   updateHud(p);
 }
 
 /* --- Render loop ----------------------------------------------------------- */
 const clock = new THREE.Clock();
-let elapsed = 0;
+let elapsed = 0, snapped = false;
 function renderFrame() { composer.render(); }
 function tick() {
   requestAnimationFrame(tick);
@@ -3046,6 +3234,7 @@ function tick() {
   const y = window.scrollY;
   // window.__pin: dev override that drives the scene from a fixed timeline point.
   rawProgress = window.__pin != null ? clamp(window.__pin, 0, 1) : scrollToT(y);
+  if (!snapped && stackRoot) { progress = rawProgress; snapped = true; }   // first frame: be where the page is, don't fly there
   const prev = progress;
   progress += (rawProgress - progress) * (1 - Math.exp(-9 * dt));
   if (Math.abs(rawProgress - progress) < 1e-5) progress = rawProgress;
@@ -3066,7 +3255,7 @@ tick();
 window.addEventListener("resize", onResize);
 
 /* --- Dev hooks ------------------------------------------------------------- */
-window.__three = { renderer, scene, camera, composer, bloom, vehicle, plumes, fields, bodies, debris,
+window.__three = { renderer, scene, camera, composer, bloom, vehicle, plumes, fields, bodies, debris, extras, get ares() { return ares; },
   get kepler() { return kepler; }, get earth() { return { group: earthGroup, R: earthR, C: earthC, surf: earthSurfMat, clouds: earthCloudMat }; }, KF };
 window.__renderAt = (p) => {
   progress = clamp(p, 0, 1); updatePath(progress); renderFrame();

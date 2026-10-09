@@ -40,6 +40,19 @@ daytime sky, the darkening through the layers and the thin blue line seen
 from space are the same atmosphere at different altitudes. Kepler-452b uses
 the same idea in reverse for the landing.
 
+## Models and textures from the library
+
+Added after a cost and benefit pass over the NASA library (each is loaded after the opening is up, merged by material into a few draw calls, and drawn only inside its own stretch of the voyage):
+
+- Earth orbit: the ISS (the light 6.6k-triangle model) and Hubble, passed as the climb rises through their altitudes
+- The Moon: lunar-grey with dark maria and an Apollo lunar module on the surface
+- The asteroid belt: Bennu, three times over, and the Dawn probe
+- Jupiter and Saturn: the Galileo and Cassini probes; Saturn's moons Rhea, Dione, Tethys, Mimas and Iapetus
+- The launch site: Ares 1 on the next pad (39B)
+- Base One: two astronauts and the 70 m dish
+
+Left out on purpose: the supernova-remnant meshes (solid polygon models, not glowing gas), the Uranus moon maps (mostly black, since Voyager 2 only imaged part of each), Ingenuity (stowed pose, invisible at its real size), Aqua (115k triangles), Gateway (63 MB), and the Moon photographs (baked perspective and shadows do not tile).
+
 ## Branches
 
 - `main` - the original single-model version.
