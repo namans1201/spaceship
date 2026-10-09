@@ -1,191 +1,136 @@
-/* Scroll-driven Space Shuttle — styles
-   Independent re-implementation of ste-vg's CodePen (GRooLza). */
+/* Scroll-driven voyage - styles */
 
 :root {
   --bg-top: #0a0e1a;
   --bg-bot: #05070f;
   --ink: #eef2ff;
-  --muted: #8b95b3;
-  --accent: #5fd0ff;
+  --muted: #b9c2dc;
+  --accent: #7fd6ff;
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
-html { scroll-behavior: smooth; }
-
 body {
   font-family: "Inter", "Helvetica Neue", system-ui, sans-serif;
   color: var(--ink);
-  background: linear-gradient(180deg, var(--bg-top), var(--bg-bot));
+  /* Flat colour: the fullscreen canvas covers it, and a gradient over an
+     ~20-viewport document is a huge paint layer for nothing. */
+  background: var(--bg-bot);
   overflow-x: hidden;
 }
 
-/* ---- 3D stage: fixed full-screen canvas behind content ---- */
-#scene {
-  position: fixed;
-  inset: 0;
-  width: 100vw;
-  height: 100vh;
-  z-index: 1;
-  display: block;
-}
+/* ---- 3D stage ---- */
+#scene { position: fixed; inset: 0; width: 100vw; height: 100vh; z-index: 1; display: block; }
 
 /* ---- Loading overlay ---- */
 .loader {
-  position: fixed;
-  inset: 0;
-  z-index: 100;
-  display: grid;
-  place-items: center;
+  position: fixed; inset: 0; z-index: 100; display: grid; place-items: center;
   background: linear-gradient(180deg, var(--bg-top), var(--bg-bot));
-  transition: opacity 0.8s ease;
+  transition: opacity 0.9s ease, visibility 0s linear 0.9s;
 }
-.loader.is-hidden { opacity: 0; pointer-events: none; }
+.loader.is-hidden { opacity: 0; visibility: hidden; pointer-events: none; }
 .loader__inner { text-align: center; width: min(320px, 70vw); }
-.loader__title {
-  letter-spacing: 0.45em;
-  font-size: 0.85rem;
-  color: var(--muted);
-  margin-bottom: 1.2rem;
-  padding-left: 0.45em;
-}
-.loader__bar {
-  height: 2px;
-  background: rgba(255, 255, 255, 0.12);
-  border-radius: 2px;
-  overflow: hidden;
-}
-.loader__bar span {
-  display: block;
-  height: 100%;
-  width: 0%;
-  background: var(--accent);
-  transition: width 0.2s ease;
-}
-.loader__pct {
-  margin-top: 0.8rem;
-  font-size: 0.75rem;
-  color: var(--muted);
-  font-variant-numeric: tabular-nums;
-}
+.loader__title { letter-spacing: 0.45em; font-size: 0.85rem; color: #8b95b3; margin-bottom: 1.2rem; padding-left: 0.45em; }
+.loader__bar { height: 2px; background: rgba(255, 255, 255, 0.12); border-radius: 2px; overflow: hidden; }
+.loader__bar span { display: block; height: 100%; width: 0%; background: linear-gradient(90deg, #7fd6ff, #c08cff); transition: width 0.2s ease; }
+.loader__pct { margin-top: 0.8rem; font-size: 0.75rem; color: #8b95b3; font-variant-numeric: tabular-nums; }
 
-/* ---- Top bar ---- */
+/* ---- Top bar / HUD ----
+   No mix-blend-mode: blending a fixed element against a canvas that repaints
+   every frame forces a backdrop readback each frame. A shadow reads as well. */
 .topbar {
-  position: fixed;
-  top: 0; left: 0; right: 0;
-  z-index: 10;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
+  position: fixed; top: 0; left: 0; right: 0; z-index: 10;
   padding: 1.4rem clamp(1.2rem, 4vw, 3rem);
-  mix-blend-mode: difference;
+  text-shadow: 0 1px 12px rgba(0, 0, 0, 0.9), 0 0 3px rgba(0, 0, 0, 0.8);
 }
-.topbar__brand { letter-spacing: 0.3em; font-weight: 600; font-size: 0.85rem; }
-.topbar__nav { display: flex; gap: 1.8rem; }
-.topbar__nav a {
-  color: var(--ink);
-  text-decoration: none;
-  font-size: 0.78rem;
-  letter-spacing: 0.15em;
-  text-transform: uppercase;
-  opacity: 0.8;
-}
-.topbar__nav a:hover { opacity: 1; }
-
-/* ---- HUD destination label ---- */
+.topbar__brand { letter-spacing: 0.32em; font-weight: 600; font-size: 0.8rem; opacity: 0.9; }
 .hud {
-  position: fixed;
-  left: clamp(1.2rem, 4vw, 3rem);
-  bottom: 1.6rem;
-  z-index: 10;
-  font-size: 0.72rem;
-  letter-spacing: 0.28em;
-  text-transform: uppercase;
-  color: var(--accent);
-  font-variant-numeric: tabular-nums;
-  padding-left: 1.2rem;
-  border-left: 2px solid var(--accent);
-  mix-blend-mode: difference;
+  position: fixed; left: clamp(1.2rem, 4vw, 3rem); bottom: 1.6rem; z-index: 10;
+  font-size: 0.72rem; letter-spacing: 0.26em; text-transform: uppercase;
+  color: var(--accent); font-variant-numeric: tabular-nums;
+  padding-left: 1.1rem; border-left: 2px solid var(--accent);
+  text-shadow: 0 1px 12px rgba(0, 0, 0, 0.9), 0 0 3px rgba(0, 0, 0, 0.8);
 }
 
-/* ---- Scrolling content ---- */
+/* ---- Panels ----
+   Every panel's visibility is driven from scroll position by app.js through
+   three variables: --tv (title), --dv (description, which rises in a beat after
+   the title) and --k (-1 below .. 0 centred .. +1 above, for a gentle drift).
+   Opacity and transform only, so it all stays on the compositor. */
 .content { position: relative; z-index: 5; }
-
 .panel {
+  --tv: 1; --dv: 1; --k: 0;
+  position: relative;
   min-height: 100vh;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  padding: 6rem clamp(1.2rem, 6vw, 7rem);
-  max-width: 620px;
+  display: flex; flex-direction: column; justify-content: center;
+  padding: 6rem clamp(1.4rem, 7vw, 8rem);
+  max-width: 680px;
+  pointer-events: none;
 }
-.panel--center { align-items: center; text-align: center; max-width: 760px; margin: 0 auto; }
+.panel--tall { min-height: 135vh; }
+.panel--center { align-items: center; text-align: center; max-width: 820px; margin: 0 auto; }
 .panel--right { margin-left: auto; align-items: flex-end; text-align: right; }
 
+/* The nebula glow behind each block of text: two soft blobs in the chapter's
+   own colours, so the type sits in a haze of the same light as its title. */
+.panel::before {
+  content: ""; position: absolute; z-index: -1;
+  width: min(560px, 80vw); height: 300px; top: 50%; left: 50%;
+  transform: translate(-50%, -50%) translateY(calc(var(--k) * -50px));
+  background:
+    radial-gradient(closest-side at 35% 45%, color-mix(in srgb, var(--g2) 38%, transparent), transparent),
+    radial-gradient(closest-side at 68% 58%, color-mix(in srgb, var(--g3) 30%, transparent), transparent);
+  filter: blur(42px);
+  opacity: calc(var(--tv) * 0.55);
+}
+.panel--left::before { left: 38%; }
+.panel--right::before { left: 62%; }
+
+.eyebrow, .title, .desc, .scroll-hint {
+  will-change: auto;
+  transform: translateY(calc(var(--k) * -38px));
+}
 .eyebrow {
-  text-transform: uppercase;
-  letter-spacing: 0.3em;
-  font-size: 0.72rem;
-  color: var(--accent);
-  margin-bottom: 1.2rem;
-}
-.step-num {
-  display: block;
-  font-size: 0.8rem;
-  letter-spacing: 0.3em;
-  color: var(--accent);
-  margin-bottom: 0.8rem;
-}
-h1 {
-  font-size: clamp(3rem, 11vw, 8rem);
-  font-weight: 800;
-  line-height: 0.92;
-  letter-spacing: -0.02em;
-  text-shadow: 0 8px 60px rgba(0, 0, 0, 0.6);
-}
-h2 {
-  font-size: clamp(2rem, 6vw, 3.6rem);
-  font-weight: 700;
-  line-height: 1;
+  font-size: 0.7rem; letter-spacing: 0.34em; text-transform: uppercase;
   margin-bottom: 1rem;
+  background: linear-gradient(90deg, var(--g1), var(--g2));
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.85)) drop-shadow(0 0 10px rgba(0, 0, 0, 0.6));
+  opacity: calc(var(--tv) * 0.95);
 }
-.lede { font-size: clamp(1rem, 2.2vw, 1.3rem); color: #c8d0ea; line-height: 1.6; margin-top: 1.4rem; }
-.panel p { color: var(--muted); font-size: 1.05rem; line-height: 1.7; max-width: 42ch; }
-.panel--right p { margin-left: auto; }
+.title {
+  font-weight: 800; line-height: 0.95; letter-spacing: -0.02em;
+  background: linear-gradient(100deg, var(--g1) 0%, var(--g2) 52%, var(--g3) 100%);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+  filter: drop-shadow(0 0 22px color-mix(in srgb, var(--g2) 45%, transparent)) drop-shadow(0 6px 30px rgba(0, 0, 0, 0.55));
+  opacity: var(--tv);
+}
+h1.title { font-size: clamp(3.4rem, 12vw, 8.6rem); }
+h2.title { font-size: clamp(2.3rem, 6.4vw, 4.4rem); }
+.desc {
+  margin-top: 1.1rem; max-width: 34ch;
+  font-size: clamp(1rem, 1.6vw, 1.18rem); line-height: 1.6; color: var(--muted);
+  text-shadow: 0 0 1px rgba(0, 0, 0, 0.9), 0 1px 3px rgba(0, 0, 0, 0.85), 0 2px 18px rgba(0, 0, 0, 0.7);
+  opacity: var(--dv);
+  transform: translateY(calc(var(--k) * -38px + (1 - var(--dv)) * 18px));
+}
+.panel--right .desc { margin-left: auto; }
+.panel--center .desc { margin-left: auto; margin-right: auto; }
 
 .scroll-hint {
-  margin-top: 3rem;
-  font-size: 0.78rem;
-  letter-spacing: 0.25em;
-  text-transform: uppercase;
-  color: var(--muted);
-  animation: bob 2s ease-in-out infinite;
+  margin-top: 2.6rem; font-size: 0.72rem; letter-spacing: 0.3em; text-transform: uppercase;
+  color: var(--muted); opacity: calc(var(--tv) * 0.8);
 }
-@keyframes bob { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(8px); } }
-
-.credit {
-  margin-top: 2.5rem;
-  font-size: 0.8rem;
-  color: var(--muted);
-}
-.credit a { color: var(--accent); }
-
-/* ---- Reveal animation (driven by IntersectionObserver -> .is-in) ---- */
-.panel > * {
-  opacity: 0;
-  transform: translateY(40px);
-  transition: opacity 0.8s ease, transform 0.8s cubic-bezier(0.16, 1, 0.3, 1);
-  will-change: transform, opacity;
-}
-.panel.is-in > * { opacity: 1; transform: none; }
-/* Stagger children as the panel reveals. */
-.panel.is-in > *:nth-child(2) { transition-delay: 0.08s; }
-.panel.is-in > *:nth-child(3) { transition-delay: 0.16s; }
-.panel.is-in > *:nth-child(4) { transition-delay: 0.24s; }
+.scroll-hint::after { content: ""; display: block; width: 1px; height: 34px; margin: 0.8rem auto 0; background: linear-gradient(var(--muted), transparent); animation: drip 2s ease-in-out infinite; }
+@keyframes drip { 0% { transform: scaleY(0); transform-origin: top; } 50% { transform: scaleY(1); transform-origin: top; } 51% { transform-origin: bottom; } 100% { transform: scaleY(0); transform-origin: bottom; } }
 
 @media (max-width: 720px) {
-  .topbar__nav { display: none; }
   .panel, .panel--right { max-width: 100%; align-items: flex-start; text-align: left; margin: 0; }
   .panel--center { align-items: center; text-align: center; }
-  .panel--right p { margin-left: 0; }
+  .panel--right .desc { margin-left: 0; }
+  .panel::before, .panel--left::before, .panel--right::before { left: 50%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .eyebrow, .title, .desc, .scroll-hint, .panel::before { transform: none !important; }
+  .scroll-hint::after { animation: none; }
 }

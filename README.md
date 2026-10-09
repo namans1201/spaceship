@@ -1,39 +1,44 @@
-# Scroll-driven Space Shuttle - branch `multi-spaceship-components`
+# Voyage - Earth to Kepler-452b
 
-**This is the latest branch** (2026-06-16 13:45). The shuttle dismantles into two
-separate components as it enters the atmosphere, rather than remaining a single
-model through the whole scroll timeline.
-
-For the project overview, attribution and run instructions, see the README on
-`main`.
-
-## What this branch changes
-
-- 1 commit ahead, 0 commits behind `main`
-- 3 files changed, 372 insertions, 244 deletions
-- Commit: "Spaceship dismantles into 2 seperate parts upon entering the atmosphere"
-
-| File | Lines changed | Change |
-| --- | --- | --- |
-| `app.js` | 507 | Scene and scroll timeline rewritten to load, position and animate two independent model components, splitting them at the atmospheric-entry point in the timeline |
-| `index.html` | 95 | Scroll sections restructured for the new sequence |
-| `styles.css` | 14 | Layout adjustments |
-
-Both `Space Shuttle (1).glb` and `Space Shuttle Orbiter.glb` are used here, where
-`main` uses only the first.
-
-## Status
-
-**Clean superset of `main`.** This branch is 1 commit ahead and 0 behind, so
-merging it into `main` is a fast-forward with no conflicts. The dismantling
-animation exists only here.
+A scroll-driven 3D journey built with Three.js. The Space Shuttle stands on its
+launcher at Launch Complex 39A on the Florida coast; scrolling lights the
+engines, and the stack climbs through the clouds and the layers of the
+atmosphere into space, shedding its boosters and tank. From there the orbiter
+flies past the Moon, Mars, Jupiter, Saturn and the ice giants, through the
+Kuiper belt and the Oort cloud, across the interstellar nebulae, and finally
+makes one full orbit of Kepler-452b before descending through its atmosphere
+to a surface base.
 
 ## Run
 
-The `.glb` files are loaded over `fetch`, so serving over HTTP is required.
-Opening `index.html` through `file://` will fail.
+Models and textures are loaded over `fetch`, so the folder must be served over
+HTTP (opening `index.html` via `file://` will not work):
 
 ```bash
-python3 -m http.server 8000
-# then open http://localhost:8000
+python3 -m http.server 8123
+# then open http://localhost:8123
 ```
+
+## Files
+
+- `index.html` - the scroll panels; each declares the point of the voyage it narrates (`data-t`)
+- `styles.css` - layout, gradient titles, scroll-driven text reveals
+- `app.js` - the whole scene: atmosphere scattering, the launch site, planets, nebulae, the flight and the landing
+- `models/` - the gantry and the spaceship
+- `3D Models/`, `Images and Textures/` - NASA public-domain models and textures
+
+## How the launch works
+
+A planet of radius R seen from altitude h looks the same as one of radius kR
+seen from kh. So Earth is a sphere whose radius shrinks as the ship climbs,
+pinned under the launch site: at ground scale the pad and coast read as flat
+land, and by orbit it is the globe the rest of the voyage uses. The sky and the
+glowing limb come from one physically based scattering model, so the blue
+daytime sky, the darkening through the layers and the thin blue line seen
+from space are the same atmosphere at different altitudes. Kepler-452b uses
+the same idea in reverse for the landing.
+
+## Branches
+
+- `main` - the original single-model version.
+- `multi-spaceship-components` - this version.

@@ -1,0 +1,8 @@
+# macOS
+.DS_Store
+
+# The full NASA model and texture library (~1.4 GB) lives here locally. Only
+# the files the site actually loads are tracked (force-added); everything else
+# stays out of git so a stray `git add .` cannot stage the whole library.
+3D Models/
+Images and Textures/
