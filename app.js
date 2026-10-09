@@ -34,6 +34,9 @@ import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
 import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
 import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
+import { mergeVertices } from "three/addons/utils/BufferGeometryUtils.js";
+import { makeKSCBuildings } from "./lib/ksc.js";
+import { spiralGalaxyTexture, edgeOnGalaxyTexture, ellipticalGalaxyTexture, nebulaTexture } from "./lib/deepsky.js";
 
 const U = (s) => encodeURI(s);
 const TEX = "Images and Textures/";
@@ -47,6 +50,14 @@ const TEXURL = {
   neptune: U(TEX + "Neptune/Neptune.jpg"),
   pluto: U(TEX + "Pluto/Pluto.jpg"),
 };
+// Moons, loaded after the opening is up (the bodies show their glint colour until then).
+const MOONURL = {
+  phobos: "Mars - Phobos/Mars - Phobos.jpg", deimos: "Mars - Deimos/Mars - Deimos.jpg",
+  io: "Jupiter - Io (A)/Jupiter - Io (A).jpg", europa: "Jupiter - Europa/Jupiter - Europa.jpg",
+  ganymede: "Jupiter - Ganymede/Jupiter - Ganymede.jpg", callisto: "Jupiter - Callisto/Jupiter - Callisto.jpg",
+  titan: "Saturn - Titan/Saturn - Titan.jpg", enceladus: "Saturn - Enceladus/Saturn - Enceladus.jpg",
+  triton: "Neptune - Triton/Neptune - Triton.jpg", charon: "Pluto - Charon/Pluto - Charon.jpg",
+};
 const MODEL = {
   stack: U("Space Shuttle (1).glb"),
   orbiter: U("Space Shuttle Orbiter.glb"),
@@ -55,6 +66,7 @@ const MODEL = {
   habitat: U("3D Models/Habitat Demonstration Unit/Habitat Demonstration Unit (part 1).glb"),
   dish: U("3D Models/Deep Space Network 34-meter/Deep Space Network 34-meter.glb"),
   ship2: U("models/Spaceship.glb"),
+  hq: U("3D Models/Headquarters Building/Headquarters Building.glb"),
 };
 
 /* --- Math ----------------------------------------------------------------- */
@@ -101,6 +113,11 @@ renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.05;
 
 const scene = new THREE.Scene();
+/* Aerial haze for the launch site's models (the ground and sky shaders do
+ * their own): without it the VAB and the towers stand out bright and flat
+ * against a landscape that is softened by distance. Only the standard
+ * materials use it, and it is switched off above the launch. */
+scene.fog = new THREE.FogExp2(0x9fb6cf, 0);
 const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.5, 9000);
 camera.position.set(20, 12, 30);
 
@@ -176,6 +193,11 @@ const ambient = new THREE.AmbientLight(0x3a4150, 0.45);            // space fill
 scene.add(ambient);
 const escort = new THREE.PointLight(0xffb070, 2.4, 120);           // engine glow on the vehicle and pad
 scene.add(escort);
+/* A soft fill from the camera's side in space: the chase camera swings round
+ * the ship to frame each planet, which can put it on the ship's night side,
+ * where the orbiter read as a black cut-out against the planet. */
+const fill = new THREE.DirectionalLight(0xdfe8ff, 0);
+scene.add(fill); scene.add(fill.target);
 
 /* --- Flight path: one anchor per original chapter (18) -------------------- *
  * Anchors 0-2 are collinear on the Y axis, so the Catmull-Rom tangent is
@@ -245,6 +267,9 @@ const GLSL_NOISE = /* glsl */ `
                mix(mix(hash13(i + vec3(0, 0, 1)), hash13(i + vec3(1, 0, 1)), f.x), mix(hash13(i + vec3(0, 1, 1)), hash13(i + vec3(1, 1, 1)), f.x), f.y), f.z);
   }
   float fbm3(vec3 p) { float s = 0.0, a = 0.5; for (int i = 0; i < 5; i++) { s += a * vn3(p); p = p * 2.03 + vec3(1.7, 9.2, 3.1); a *= 0.5; } return s; }
+  // three-octave versions, for broad shapes where the fine octaves are never seen
+  float fbm2l(vec2 p) { float s = 0.0, a = 0.5; for (int i = 0; i < 3; i++) { s += a * vn2(p); p = p * 2.03 + vec2(1.7, 9.2); a *= 0.5; } return s + 0.0625; }
+  float fbm3l(vec3 p) { float s = 0.0, a = 0.5; for (int i = 0; i < 3; i++) { s += a * vn3(p); p = p * 2.03 + vec3(1.7, 9.2, 3.1); a *= 0.5; } return s + 0.0625; }
 `;
 
 /* Single-scattering atmosphere (Rayleigh + Mie), integrated along the view ray
@@ -321,15 +346,18 @@ const GLSL_SUNT = /* glsl */ `
   vec3 sunTrans(vec3 pos, vec3 C, float R, float Ra, vec3 bR, float bM, float hR, float hM, vec3 L) {
     vec2 tl = raySphere(pos, L, C, Ra);
     if (tl.y <= 0.0) return vec3(1.0);
-    vec2 tp = raySphere(pos + L * 0.01 * R, L, C, R);
-    if (tp.x > 0.0) return vec3(0.0);
+    // the planet's shadow, with a soft edge (the sun is a disc, and the air
+    // bends and scatters light round the limb) rather than a hard cut-off
+    float b = dot(C - pos, L);
+    float shadow = b > 0.0 ? smoothstep(R * 0.992, R * 1.006, length(C - pos - L * b)) : 1.0;
+    if (shadow <= 0.0) return vec3(0.0);
     float dl = tl.y / 6.0; float lR = 0.0, lM = 0.0;
     for (int j = 0; j < 6; j++) {
       vec3 pl = pos + L * (dl * (float(j) + 0.5));
       float hl = max(length(pl - C) - R, 0.0);
       lR += exp(-hl / hR) * dl; lM += exp(-hl / hM) * dl;
     }
-    return exp(-(bR * lR + bM * 1.1 * lM));
+    return exp(-(bR * lR + bM * 1.1 * lM)) * shadow;
   }
 `;
 
@@ -381,14 +409,14 @@ const skyMaterial = new THREE.ShaderMaterial({
       vec3 rd = normalize(vWP - cameraPosition);
       vec3 col = vec3(0.0), Tt = vec3(1.0), T;
       if (uEOn > 0.5) {
-        col += atmo(cameraPosition, rd, 1e9, uEC, uER, uERa, uEBR, uEBM, uEHR, uEHM, uESunDir, uESunI, 14, 6, T);
+        col += atmo(cameraPosition, rd, 1e9, uEC, uER, uERa, uEBR, uEBM, uEHR, uEHM, uESunDir, uESunI, 12, 5, T);
         // the sun's disc, seen through the air
         float sd = dot(rd, uESunDir);
         col += vec3(1.0, 0.95, 0.85) * smoothstep(0.99985, 0.99995, sd) * 30.0 * T;
         Tt *= T;
       }
       if (uKOn > 0.5) {
-        vec3 c2 = atmo(cameraPosition, rd, 1e9, uKC, uKR, uKRa, uKBR, uKBM, uKHR, uKHM, uKSunDir, uKSunI, 14, 6, T);
+        vec3 c2 = atmo(cameraPosition, rd, 1e9, uKC, uKR, uKRa, uKBR, uKBM, uKHR, uKHM, uKSunDir, uKSunI, 12, 5, T);
         col = col * T + c2; Tt *= T;
       }
       float a = 1.0 - clamp(dot(Tt, vec3(0.3333)), 0.0, 1.0);
@@ -402,12 +430,108 @@ const skyMaterial = new THREE.ShaderMaterial({
 const skyDome = new THREE.Mesh(new THREE.SphereGeometry(4000, 48, 32), skyMaterial);
 skyDome.renderOrder = -9; skyDome.frustumCulled = false;
 scene.add(skyDome);
-let starSphere = null;
+let starSphere = null, skyStars = null;
+/* The star map is 2,880 px around the whole sky and draws its stars as small
+ * blocks of texels; magnified ~2.5x on screen they read as coloured squares.
+ * So the map is split in two: its stars are found once at load (local maxima)
+ * and redrawn as anti-aliased point sprites at infinity, keeping their real
+ * positions, colours and brightness; the map itself is drawn blurred, which
+ * leaves the diffuse glow of the Milky Way and its dust lanes. */
 function makeStarSphere(tex) {
-  const m = new THREE.MeshBasicMaterial({ map: tex, side: THREE.BackSide, depthTest: false, depthWrite: false });
-  starSphere = new THREE.Mesh(new THREE.SphereGeometry(6000, 48, 32), m);
+  const glow = skyGlowTexture(tex.image);
+  const m = new THREE.ShaderMaterial({
+    uniforms: { uMap: { value: glow }, uColor: { value: new THREE.Color(1, 1, 1) } },
+    vertexShader: /* glsl */ `varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+    fragmentShader: /* glsl */ `
+      uniform sampler2D uMap; uniform vec3 uColor; varying vec2 vUv;
+      void main() {
+        vec3 c = texture2D(uMap, vUv).rgb;
+        c = max(c - 0.01, 0.0) * 1.3;                            // lift the band off a clean black
+        gl_FragColor = vec4(c * uColor, 1.0);
+        #include <tonemapping_fragment>
+        #include <colorspace_fragment>
+      }`,
+    side: THREE.BackSide, depthTest: false, depthWrite: false,
+  });
+  starSphere = new THREE.Mesh(new THREE.SphereGeometry(6000, 64, 40), m);
   starSphere.renderOrder = -10; starSphere.frustumCulled = false;
   scene.add(starSphere);
+  skyStars = extractStars(tex.image, 14000);
+  skyStars.renderOrder = -9.5;
+  starSphere.add(skyStars);
+}
+/* The diffuse light of the map without its stars: halve it (stars shrink to a
+ * pixel), erode with a 3x3 minimum (which removes isolated points but keeps
+ * the broad band and its dust lanes), then blur. */
+function skyGlowTexture(img) {
+  const w = img.width >> 1, h = img.height >> 1;
+  const c = document.createElement("canvas"); c.width = w; c.height = h;
+  const g = c.getContext("2d", { willReadFrequently: true });
+  g.imageSmoothingQuality = "high"; g.drawImage(img, 0, 0, w, h);
+  const src = g.getImageData(0, 0, w, h), s = src.data, out = g.createImageData(w, h), o = out.data;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const j = (y * w + x) * 4;
+    for (let ch = 0; ch < 3; ch++) {
+      let mn = 255;
+      for (let dy = -1; dy <= 1; dy++) {
+        const yy = clamp(y + dy, 0, h - 1);
+        for (let dx = -1; dx <= 1; dx++) { const v = s[(yy * w + ((x + dx + w) % w)) * 4 + ch]; if (v < mn) mn = v; }
+      }
+      o[j + ch] = mn;
+    }
+    o[j + 3] = 255;
+  }
+  g.putImageData(out, 0, 0);
+  const b = document.createElement("canvas"); b.width = w; b.height = h;
+  const bg = b.getContext("2d"); bg.filter = "blur(2px)"; bg.drawImage(c, 0, 0);
+  const t = new THREE.CanvasTexture(b);
+  t.colorSpace = THREE.SRGBColorSpace; t.wrapS = THREE.RepeatWrapping; t.minFilter = THREE.LinearMipmapLinearFilter;
+  return t;
+}
+function extractStars(img, maxN) {
+  const w = img.width, h = img.height;
+  const c = document.createElement("canvas"); c.width = w; c.height = h;
+  const g = c.getContext("2d", { willReadFrequently: true }); g.drawImage(img, 0, 0);
+  const d = g.getImageData(0, 0, w, h).data;
+  const lum = new Float32Array(w * h);
+  for (let i = 0, j = 0; i < lum.length; i++, j += 4) lum[i] = 0.3 * d[j] + 0.59 * d[j + 1] + 0.11 * d[j + 2];
+  const found = [];
+  for (let y = 1; y < h - 1; y++) for (let x = 0; x < w; x++) {
+    const i = y * w + x, v = lum[i];
+    if (v < 46) continue;
+    const xl = y * w + ((x + w - 1) % w), xr = y * w + ((x + 1) % w);
+    // strict on one side, non-strict on the other, so a flat-topped star counts once
+    if (v <= lum[xl] || v < lum[xr] || v <= lum[i - w] || v < lum[i + w] || v <= lum[xl - w] || v < lum[xr + w] || v <= lum[xr - w] || v < lum[xl + w]) continue;
+    found.push(i);
+  }
+  found.sort((a, b) => lum[b] - lum[a]);
+  const n = Math.min(maxN, found.length);
+  const pos = new Float32Array(n * 3), col = new Float32Array(n * 3), size = new Float32Array(n);
+  const R = 5000, cc = new THREE.Color();
+  for (let k = 0; k < n; k++) {
+    const i = found[k], x = i % w, y = (i - x) / w;
+    // SphereGeometry's mapping (texture flipped so row 0 is the top): phi from u, theta from v
+    const phi = ((x + 0.5) / w) * Math.PI * 2, th = ((y + 0.5) / h) * Math.PI;
+    pos.set([-Math.cos(phi) * Math.sin(th) * R, Math.cos(th) * R, Math.sin(phi) * Math.sin(th) * R], k * 3);
+    const j = i * 4, b = lum[i] / 255;
+    cc.setRGB(d[j] / 255, d[j + 1] / 255, d[j + 2] / 255, THREE.SRGBColorSpace);
+    const mx = Math.max(cc.r, cc.g, cc.b, 1e-3);
+    cc.multiplyScalar(1 / mx);                                   // hue from the map, brightness from size
+    cc.lerp(new THREE.Color(1, 1, 1), 0.25);
+    const k2 = 0.35 + 1.25 * Math.pow(b, 2.2);
+    col.set([cc.r * k2, cc.g * k2, cc.b * k2], k * 3);
+    size[k] = R * (0.9 + 2.4 * Math.pow(b, 3)) / 1100;           // ~1-3 px at 800 px tall, whatever the distance
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute("color", new THREE.BufferAttribute(col, 3));
+  geo.setAttribute("aSize", new THREE.BufferAttribute(size, 1));
+  const pts = new THREE.Points(geo, softPointsMaterial({ opacity: 1, maxPx: 5 }));
+  // In the opaque list (additive blending still applies), between the sky map
+  // and the atmosphere, so daylight hides them exactly as it hides the map.
+  pts.material.depthTest = false; pts.material.transparent = false;
+  pts.frustumCulled = false;
+  return pts;
 }
 
 /* --- Planet geometry ------------------------------------------------------- *
@@ -490,49 +614,144 @@ const GLSL_TERRAIN = /* glsl */ `
   // lagoons, the concrete hardstand with its flame trench and scorch, the
   // perimeter road and the crawlerway running west.
   vec3 terrainEarth(vec2 q, out float water) {
-    float coast = 46.0 + 9.0 * sin(q.y * 0.012 + 1.3) + (fbm2(vec2(q.y * 0.02, 5.3)) - 0.5) * 16.0;
-    float lagoon = smoothstep(0.6, 0.64, fbm2(q * 0.006 + vec2(3.0, 7.0))) * smoothstep(-80.0, -170.0, q.x);
+    // detail finer than a pixel fades out instead of shimmering
+    float fw = max(length(fwidth(q)), 1e-4);
+    float hf = 1.0 - smoothstep(0.12, 0.5, fw), mf = 1.0 - smoothstep(0.6, 2.5, fw);
+    vec2 q0 = vec2(0.848 * q.x + 0.53 * q.y, -0.53 * q.x + 0.848 * q.y);   // frame of the crawlerway (x0 < 0 toward the VAB)
+    vec2 vab = vec2(-118.7, -74.2);
+    vec2 qv = q - vab; vec2 qv0 = vec2(0.848 * qv.x + 0.53 * qv.y, -0.53 * qv.x + 0.848 * qv.y);
+    float coast = 46.0 + 9.0 * sin(q.y * 0.012 + 1.3) + (fbm2l(vec2(q.y * 0.02, 5.3)) - 0.5) * 16.0 + (vn2(vec2(q.y * 0.15, 2.0)) - 0.5) * 2.0 * mf;
+    float lagoonN = fbm2l(q * 0.006 + vec2(3.0, 7.0));
+    float lagoon = smoothstep(0.6, 0.64, lagoonN) * smoothstep(-80.0, -170.0, q.x) * smoothstep(40.0, 60.0, length(qv));
     water = max(step(coast, q.x), lagoon);
-    float v1 = fbm2(q * 0.035), v2 = fbm2(q * 0.17 + 11.0), v3 = vn2(q * 1.1);
-    vec3 col = mix(vec3(0.12, 0.17, 0.08), vec3(0.25, 0.26, 0.14), v1);
-    col = mix(col, vec3(0.06, 0.11, 0.05), smoothstep(0.55, 0.7, v2) * 0.75);
-    col *= 0.86 + 0.28 * v3;
-    col = mix(col, vec3(0.74, 0.69, 0.55), smoothstep(coast - 7.0, coast - 2.0, q.x));
+    // coastal scrub and palmetto, oak and pine stands, tree clumps, sandy
+    // clearings, and marsh grass toward the lagoons
+    float v1 = fbm2l(q * 0.035), v2 = fbm2(q * 0.17 + 11.0), v3 = vn2(q * 1.1), v4 = vn2(q * 4.3 + 3.1), v5 = fbm2l(q * 0.012 + 40.0);
+    vec3 col = mix(vec3(0.11, 0.15, 0.07), vec3(0.23, 0.25, 0.12), v1);
+    col = mix(col, vec3(0.05, 0.09, 0.04), smoothstep(0.55, 0.7, v2) * 0.8);
+    vec2 cell = floor(q * 0.75), fc = fract(q * 0.75) - 0.5;
+    vec2 off = vec2(hash12(cell + 3.1), hash12(cell + 7.7)) - 0.5;
+    float tree = (1.0 - smoothstep(0.12, 0.3, length(fc - off * 0.5))) * step(0.5, hash12(cell)) * smoothstep(0.42, 0.6, v2);
+    col = mix(col, vec3(0.03, 0.055, 0.025), tree * mf * 0.85);
+    col = mix(col, vec3(0.44, 0.4, 0.29), smoothstep(0.68, 0.8, v5) * 0.55);
+    float marsh = smoothstep(-60.0, -100.0, q.x) * smoothstep(0.5, 0.6, lagoonN);
+    col = mix(col, vec3(0.24, 0.23, 0.12) * (0.85 + 0.3 * vn2(q * vec2(0.4, 2.0))), marsh * 0.75);
+    col *= 0.84 + 0.3 * v3;
+    col *= mix(1.0, 0.82 + 0.36 * v4, hf);
+    // the beach: dry sand, then darker wet sand at the waterline
+    col = mix(col, vec3(0.78, 0.72, 0.58) * (0.92 + 0.12 * v4 * hf), smoothstep(coast - 9.0, coast - 4.0, q.x));
+    col = mix(col, vec3(0.5, 0.46, 0.37), smoothstep(coast - 2.6, coast - 0.6, q.x));
+    // concrete: jointed slabs, each a slightly different pour, with stains
+    vec2 slab = floor(q * 0.5), sf = fract(q * 0.5);
+    float joint = (1.0 - smoothstep(0.0, 0.025 + fw * 0.6, min(min(sf.x, 1.0 - sf.x), min(sf.y, 1.0 - sf.y)))) * hf;
+    vec3 conc = vec3(0.52, 0.52, 0.5) * (0.9 + 0.12 * hash12(slab)) * (0.86 + 0.18 * fbm2l(q * 0.35)) * (0.93 + 0.1 * vn2(q * 3.0) * hf);
+    conc *= 1.0 - 0.3 * joint;
+    conc *= 1.0 - 0.35 * smoothstep(0.6, 0.8, fbm2l(q * 0.6 + 9.0));
     float oct = max(max(abs(q.x), abs(q.y)), (abs(q.x) + abs(q.y)) * 0.7071);
     float hard = 1.0 - smoothstep(9.4, 10.0, oct);
-    vec3 conc = vec3(0.47, 0.47, 0.45) * (0.8 + 0.3 * vn2(q * 1.9)) * (0.88 + 0.16 * fbm2(q * 0.35));
-    conc *= 1.0 - 0.25 * (1.0 - smoothstep(0.04, 0.09, abs(fract(q.x * 0.25) - 0.5))) * step(abs(q.y), 9.0);
     col = mix(col, conc, hard);
-    col *= 1.0 - 0.5 * exp(-dot(q, q) / 22.0) * hard;
-    float trench = (1.0 - smoothstep(1.1, 1.35, abs(q.x))) * (1.0 - smoothstep(13.0, 14.0, abs(q.y)));
-    col = mix(col, vec3(0.045), trench);
+    // soot: around the launcher and fanned north and south out of the flame trench
+    float soot = exp(-dot(q, q) / 22.0) + 0.6 * exp(-pow(q.x / (2.0 + abs(q.y) * 0.3), 2.0) - pow((abs(q.y) - 12.5) / 3.5, 2.0));
+    col *= 1.0 - 0.4 * clamp(soot, 0.0, 1.0) * (0.6 + 0.4 * vn2(q * 0.9));
+    // the flame trench: a narrow slot under the launcher, its walls blackened
+    float trench = (1.0 - smoothstep(0.7, 0.85, abs(q.x))) * (1.0 - smoothstep(11.0, 11.6, abs(q.y)));
+    col = mix(col, vec3(0.05, 0.048, 0.045) * (0.8 + 0.4 * vn2(q * 2.0)), trench * 0.92);
+    // the perimeter road round the pad, and the access road north
     float ring = smoothstep(25.0, 25.5, oct) * (1.0 - smoothstep(26.5, 27.0, oct));
-    col = mix(col, vec3(0.1, 0.1, 0.11), ring);
-    float cw = step(q.x, -10.0) * (1.0 - smoothstep(0.5, 0.8, abs(abs(q.y) - 1.7)));
-    col = mix(col, vec3(0.56, 0.54, 0.49), cw);
+    vec3 asphalt = vec3(0.1, 0.1, 0.105) * (0.9 + 0.2 * vn2(q * 2.0));
+    col = mix(col, asphalt, ring);
     float nr = step(q.y, -26.5) * (1.0 - smoothstep(0.6, 0.9, abs(q.x - 8.0)));
-    col = mix(col, vec3(0.11), nr);
-    if (water > 0.5) col = vec3(0.016, 0.06, 0.1) + 0.035 * fbm2(q * 0.05);
-    float surf = (1.0 - smoothstep(0.0, 1.8, abs(q.x - coast))) * (1.0 - lagoon);
-    col = mix(col, vec3(0.86, 0.9, 0.92), surf * 0.55);
+    float dash = step(0.5, fract(q.y * 0.25)) * (1.0 - smoothstep(0.03, 0.07 + fw * 0.5, abs(q.x - 8.0))) * hf;
+    col = mix(col, mix(asphalt, vec3(0.85, 0.75, 0.3), dash), nr);
+    // the crawlerway: two lanes of river-rock gravel with a grass median,
+    // and a service road alongside it
+    float cwBand = step(q0.x, -10.0) * step(-110.0, q0.x);
+    float lane = 1.0 - smoothstep(0.5, 0.8, abs(abs(q0.y) - 1.7));
+    vec3 gravel = vec3(0.62, 0.6, 0.55) * (0.86 + 0.22 * vn2(q * 7.0) * hf + 0.1 * vn2(q * 1.4));
+    col = mix(col, gravel, lane * cwBand);
+    float sr = step(q0.x, -27.0) * step(-112.0, q0.x) * (1.0 - smoothstep(0.45, 0.7, abs(q0.y + 7.0)));
+    col = mix(col, asphalt, sr);
+    // the VAB's apron and car park
+    float apron = (1.0 - smoothstep(17.0, 18.0, abs(qv0.x))) * (1.0 - smoothstep(21.0, 22.0, abs(qv0.y)));
+    float park = (1.0 - smoothstep(0.03, 0.06 + fw * 0.5, abs(fract(qv0.y * 0.6) - 0.5))) * step(8.0, qv0.x) * hf;
+    col = mix(col, mix(conc * 0.9, vec3(0.8), park * 0.6), apron);
+    if (water > 0.5) {
+      // shallow turquoise over the sand, deepening to Atlantic blue
+      float depth = clamp((q.x - coast) / 70.0, 0.0, 1.0);
+      col = mix(vec3(0.06, 0.18, 0.18), vec3(0.012, 0.045, 0.085), smoothstep(0.0, 0.5, depth));
+      col *= 0.92 + 0.12 * fbm2l(q * 0.05);
+      if (lagoon > 0.5) col = vec3(0.03, 0.07, 0.07) * (0.9 + 0.2 * fbm2l(q * 0.04));
+    }
+    // surf: the break at the shore and a second line of white water off it
+    float surf = (1.0 - smoothstep(0.0, 1.6, abs(q.x - coast))) * (1.0 - lagoon);
+    float surf2 = (1.0 - smoothstep(0.0, 0.7, abs(q.x - coast - 4.5 - sin(q.y * 0.07) * 1.5))) * smoothstep(0.35, 0.7, vn2(q * vec2(0.3, 0.9))) * (1.0 - lagoon);
+    col = mix(col, vec3(0.86, 0.9, 0.92), clamp(surf * 0.6 + surf2 * 0.4 * mf, 0.0, 1.0));
     return col;
   }
-  // Kepler-452b around Base One: ochre plains, darker mossy patches, rust
-  // ridges, with the landing pad and its markings.
+  // Kepler-452b around Base One: ochre sand and clay, mossy lowlands, pale salt
+  // flats and rust ridges, strewn with rocks and wind ripples, a slab-jointed
+  // apron round the landing pad with its markings and scorch, and a track out
+  // to the buildings.
+  float kRockMask = 0.0;   // set by terrainKepler: where a rock stands (the caller shades it)
   vec3 terrainKepler(vec2 q, out float water) {
-    float e = fbm2(q * 0.01 + 4.0);
+    float fw = max(length(fwidth(q)), 1e-4);
+    float hf = 1.0 - smoothstep(0.1, 0.5, fw), mf = 1.0 - smoothstep(0.5, 2.5, fw);
+    float e = fbm2l(q * 0.01 + 4.0);
     water = step(e, 0.34) * smoothstep(70.0, 130.0, length(q));
-    vec3 col = mix(vec3(0.47, 0.37, 0.22), vec3(0.2, 0.27, 0.17), smoothstep(0.45, 0.62, fbm2(q * 0.035 + 7.0)));
-    col = mix(col, vec3(0.56, 0.35, 0.22), smoothstep(0.6, 0.76, fbm2(q * 0.08 + 3.0)) * 0.6);
-    col *= 0.84 + 0.32 * vn2(q * 0.9);
+    float m1 = fbm2l(q * 0.035 + 7.0), m2 = fbm2l(q * 0.08 + 3.0), m3 = fbm2l(q * 0.3 + 21.0), m4 = vn2(q * 2.4 + 5.0);
+    vec3 sand = vec3(0.43, 0.3, 0.16), moss = vec3(0.14, 0.2, 0.09), rust = vec3(0.4, 0.19, 0.1), pale = vec3(0.58, 0.48, 0.34), rockc = vec3(0.17, 0.13, 0.11);
+    vec3 col = mix(sand, moss, smoothstep(0.45, 0.62, m1));
+    col = mix(col, rust, smoothstep(0.58, 0.74, m2) * 0.75);
+    col = mix(col, pale, smoothstep(0.62, 0.78, fbm2l(q * 0.02 + 60.0)) * 0.65);
+    // wind ripples on the open sand, streaks of lighter grit
+    float rip = sin((q.x * 0.8 + q.y * 0.3 + m3 * 6.0) * 3.2);
+    col *= 1.0 + 0.07 * rip * mf * (1.0 - smoothstep(0.55, 0.65, m1));
+    col *= 0.86 + 0.26 * m4 * hf + 0.12 * (vn2(q * 9.0) - 0.5) * hf + 0.18 * (m3 - 0.5);
+    // dried-mud cracks in the rust clay
+    float crack = 1.0 - smoothstep(0.0, 0.05 + fw * 0.4, abs(fract(q.x * 0.35 + vn2(q * 0.7) * 1.6) - 0.5) - 0.44);
+    crack *= smoothstep(0.62, 0.72, m2) * hf;
+    col *= 1.0 - 0.32 * crack;
     float r = length(q);
+    // pebbles and boulders: two scales of scattered cells, darker with a pale
+    // dusted top; none on the concrete
+    vec2 rc = floor(q * 0.9), rf = fract(q * 0.9) - 0.5;
+    vec2 ro = (vec2(hash12(rc + 1.3), hash12(rc + 8.1)) - 0.5) * 0.6;
+    float rr = 0.12 + 0.2 * hash12(rc + 4.4);
+    float rd = length(rf - ro);
+    float pebble = step(0.74, hash12(rc)) * (1.0 - smoothstep(rr * 0.4, rr, rd)) * mf;
+    vec2 bc = floor(q * 0.22), bf = fract(q * 0.22) - 0.5;
+    vec2 bo = (vec2(hash12(bc + 11.3), hash12(bc + 3.1)) - 0.5) * 0.5;
+    float br = 0.16 + 0.16 * hash12(bc + 9.4);
+    float bd = length(bf - bo);
+    float boulder = step(0.7, hash12(bc + 5.0)) * (1.0 - smoothstep(br * 0.4, br, bd)) * step(7.5, r);
+    kRockMask = max(pebble, boulder * 1.0) * smoothstep(5.8, 7.4, r);
+    float rtop = clamp(1.0 - min(rd / rr, bd / br), 0.0, 1.0);
+    col = mix(col, rockc * (0.55 + 0.8 * vn2(q * 7.0)) * (0.75 + 0.6 * rtop), kRockMask);
+    // the apron, the pad and its markings
+    float apron = 1.0 - smoothstep(5.7, 6.3, r);
+    vec2 slab = floor(q * 0.5), sf = fract(q * 0.5);
+    float joint = (1.0 - smoothstep(0.0, 0.03 + fw * 0.6, min(min(sf.x, 1.0 - sf.x), min(sf.y, 1.0 - sf.y)))) * hf;
+    vec3 conc = vec3(0.4, 0.39, 0.38) * (0.88 + 0.14 * hash12(slab)) * (0.9 + 0.16 * vn2(q * 3.0) * hf) * (0.92 + 0.14 * fbm2l(q * 0.5));
+    conc *= 1.0 - 0.32 * joint;
+    // dust drifted over the apron's edge, and scorch from a hundred landings
+    conc = mix(conc, col, smoothstep(4.6, 6.2, r) * 0.6);
+    conc *= 1.0 - 0.5 * exp(-r * r / 6.0) * (0.7 + 0.3 * vn2(q * 1.3));
+    col = mix(col, conc, apron);
     float pad = 1.0 - smoothstep(4.2, 4.5, r);
-    col = mix(col, vec3(0.42, 0.43, 0.45) * (0.9 + 0.2 * vn2(q * 3.0)), pad);
-    col = mix(col, vec3(0.95, 0.75, 0.2), (1.0 - smoothstep(0.08, 0.15, abs(r - 3.5))) * pad);
-    col = mix(col, vec3(0.95, 0.75, 0.2), (1.0 - smoothstep(0.1, 0.18, abs(q.x))) * (1.0 - smoothstep(1.3, 1.5, abs(q.y))) * pad);
-    float road = (1.0 - smoothstep(0.5, 0.8, abs(q.y - 0.35 * q.x))) * step(4.2, r) * step(r, 16.0) * step(0.0, q.x);
-    col = mix(col, vec3(0.32, 0.3, 0.28), road);
-    if (water > 0.5) col = vec3(0.03, 0.11, 0.13) + 0.03 * fbm2(q * 0.05);
+    col = mix(col, conc * 1.08, pad);
+    vec3 yellow = vec3(0.95, 0.75, 0.2), white = vec3(0.86);
+    col = mix(col, yellow, (1.0 - smoothstep(0.08, 0.16, abs(r - 3.5))) * pad);
+    col = mix(col, white, (1.0 - smoothstep(0.04, 0.1, abs(r - 5.1))) * apron * 0.4);
+    float hbar = (1.0 - smoothstep(0.1, 0.18, abs(q.x))) * (1.0 - smoothstep(1.3, 1.5, abs(q.y)));
+    float hbar2 = (1.0 - smoothstep(0.1, 0.18, abs(q.y))) * (1.0 - smoothstep(1.3, 1.5, abs(q.x)));
+    col = mix(col, yellow, max(hbar, hbar2) * pad);
+    // hazard chevrons on the pad edge
+    float chev = step(0.5, fract((atan(q.y, q.x) * 6.0 / 3.14159 + r * 0.0))) * (1.0 - smoothstep(0.1, 0.2, abs(r - 4.0)));
+    col = mix(col, vec3(0.05), chev * pad * 0.8);
+    // the track out to the buildings, and the edge of its gravel
+    float road = (1.0 - smoothstep(0.5, 0.8, abs(q.y - 0.35 * q.x))) * step(4.2, r) * step(r, 28.0) * step(0.0, q.x);
+    col = mix(col, vec3(0.34, 0.31, 0.29) * (0.85 + 0.3 * vn2(q * 4.0)), road);
+    if (water > 0.5) col = vec3(0.03, 0.11, 0.13) + 0.03 * fbm2l(q * 0.05);
     return col;
   }
 `;
@@ -543,7 +762,7 @@ function terrestrialMaterial({ day, night = null, kind, atmoU, texRot }) {
       uDay: { value: day }, uNight: { value: night || day }, uNightK: { value: night ? 1.3 : 0 },
       uTexRot: { value: texRot }, uLod: { value: 0 }, uOpacity: { value: 1 },
       uPad: { value: new THREE.Vector3() }, uPadX: { value: new THREE.Vector3(1, 0, 0) }, uPadZ: { value: new THREE.Vector3(0, 0, 1) },
-      uDetail: { value: 0 }, uKind: { value: kind }, uWaterAlpha: { value: kind === 1 ? 1 : 0 }, uHaze: { value: 1 },
+      uDetail: { value: 0 }, uKind: { value: kind }, uWaterAlpha: { value: kind === 1 ? 1 : 0 }, uHaze: { value: 1 }, uTime: { value: 0 },
       uC: atmoU.uC, uR: atmoU.uR, uRa: atmoU.uRa, uBR: atmoU.uBR, uBM: atmoU.uBM, uHR: atmoU.uHR, uHM: atmoU.uHM,
       uSunDir: atmoU.uSunDir, uSunI: atmoU.uSunI,
     },
@@ -558,7 +777,7 @@ function terrestrialMaterial({ day, night = null, kind, atmoU, texRot }) {
     fragmentShader: /* glsl */ `
       uniform sampler2D uDay; uniform sampler2D uNight; uniform float uNightK;
       uniform mat3 uTexRot; uniform float uLod; uniform float uOpacity;
-      uniform vec3 uPad; uniform vec3 uPadX; uniform vec3 uPadZ; uniform float uDetail; uniform int uKind; uniform float uWaterAlpha;
+      uniform vec3 uPad; uniform vec3 uPadX; uniform vec3 uPadZ; uniform float uDetail; uniform int uKind; uniform float uWaterAlpha; uniform float uTime;
       uniform vec3 uC; uniform float uR; uniform float uRa; uniform vec3 uBR; uniform float uBM; uniform float uHR; uniform float uHM;
       uniform vec3 uSunDir; uniform float uSunI;
       varying vec3 vWP; varying vec3 vN; varying vec3 vO;
@@ -592,6 +811,24 @@ function terrestrialMaterial({ day, night = null, kind, atmoU, texRot }) {
             float tw;
             vec3 ta = uKind == 0 ? terrainEarth(q, tw) : terrainKepler(q, tw);
             base = mix(base, ta, w); ocean = mix(ocean, tw, w);
+            if (uKind == 1 && tw < 0.5) {
+              // relief from screen-space derivatives of the ground's height: grit, ripples, rocks standing up
+              float hq = (0.5 * vn2(q * 3.1) + 0.25 * vn2(q * 9.0) + 1.0 * kRockMask) * 0.35 * w;
+              vec3 dpx = dFdx(vWP), dpy = dFdy(vWP);
+              vec3 r1 = cross(dpy, N), r2 = cross(N, dpx);
+              float det = dot(dpx, r1);
+              vec3 grad = sign(det) * (dFdx(hq) * r1 + dFdy(hq) * r2);
+              N = normalize(abs(det) * N - grad * 0.12);
+            }
+            if (tw > 0.5) {
+              // wind swell and chop, as a moving normal: the sun glitters on it
+              float fwq = length(fwidth(q));
+              vec2 wq = q * vec2(0.55, 0.22) + vec2(uTime * 0.35, uTime * 0.08);
+              float e = 0.25;
+              float h0 = vn2(wq) + 0.5 * vn2(wq * 2.3), hx = vn2(wq + vec2(e, 0.0)) + 0.5 * vn2((wq + vec2(e, 0.0)) * 2.3), hy = vn2(wq + vec2(0.0, e)) + 0.5 * vn2((wq + vec2(0.0, e)) * 2.3);
+              vec2 g = vec2(hx - h0, hy - h0) / e;
+              N = normalize(N - (uPadX * g.x + uPadZ * g.y) * 0.5 * w * (1.0 - smoothstep(0.5, 4.0, fwq)));
+            }
           }
         }
         float ndl = dot(N, L);
@@ -607,7 +844,7 @@ function terrestrialMaterial({ day, night = null, kind, atmoU, texRot }) {
         vec3 T;
         vec3 rd = normalize(vWP - cameraPosition);
         float dist = length(vWP - cameraPosition);
-        vec3 ins = atmo(cameraPosition, rd, dist, uC, uR, uRa, uBR, uBM, uHR, uHM, L, uSunI, 8, 4, T);
+        vec3 ins = atmo(cameraPosition, rd, dist, uC, uR, uRa, uBR, uBM, uHR, uHM, L, uSunI, 6, 3, T);
         col = applyHaze(col, T, ins, dist);
         gl_FragColor = vec4(col, uOpacity);
         #include <tonemapping_fragment>
@@ -649,18 +886,27 @@ function cloudShellMaterial({ map, atmoU, texRot, coverage = 1 }) {
         float ca = cos(uTime * 0.004), sa = sin(uTime * 0.004);
         vec3 md = uTexRot * vec3(ca * o.x - sa * o.z, o.y, sa * o.x + ca * o.z);   // slow drift
         float a = sampleEq4(uMap, md, exp2(uLod)).a * uCover;
+        float shade = 1.0;
         if (uDetail > 0.001) {
+          // fair-weather cumulus in world units: rounded cells with crisp
+          // edges, lit on the side toward the sun (the density a step sunward
+          // is the self-shadowing), thick cores grey from below
           vec3 rel = vWP - uPad;
-          float n = fbm3(rel / 34.0 + vec3(uTime * 0.01, 0.0, 0.0));
-          float puff = smoothstep(0.5, 0.68, n) * 0.95;
+          vec3 drift = vec3(uTime * 0.01, 0.0, 0.0);
+          float n = fbm3(rel / 34.0 + drift) + (vn3(rel / 7.0 + drift * 3.0) - 0.5) * 0.1;
+          float n2 = fbm3l((rel + normalize(uSunDir) * 9.0) / 34.0 + drift);
+          float puff = smoothstep(0.5, 0.64, n) * 0.96;
           float w = uDetail * (1.0 - smoothstep(700.0, 1500.0, length(rel.xz)));
           a = mix(a, puff, w);
+          float below = step(dot(cameraPosition - vWP, normalize(vWP - uC)), 0.0);
+          float s = clamp(0.62 + (n - n2) * 4.0, 0.35, 1.1) * (1.0 - 0.38 * below * smoothstep(0.56, 0.8, n));
+          shade = mix(1.0, s, w);
         }
         if (a < 0.003) discard;
         float ndl = dot(N, L);
         vec3 sunT = sunTrans(vWP, uC, uR, uRa, uBR, uBM, uHR, uHM, L);
         float lit = smoothstep(-0.2, 0.35, ndl);
-        vec3 col = vec3(0.94, 0.95, 0.97) * (sunT * uSunI * 0.05 * (0.35 + 0.65 * lit)) + vec3(0.04, 0.06, 0.09) * (0.3 + lit);
+        vec3 col = vec3(0.94, 0.95, 0.97) * (sunT * uSunI * 0.05 * (0.35 + 0.65 * lit)) * shade + vec3(0.04, 0.06, 0.09) * (0.3 + lit);
         vec3 T; vec3 rd = normalize(vWP - cameraPosition);
         float dist = length(vWP - cameraPosition);
         vec3 ins = atmo(cameraPosition, rd, dist, uC, uR, uRa, uBR, uBM, uHR, uHM, L, uSunI, 6, 3, T);
@@ -808,29 +1054,16 @@ function spriteTexture(kind, seed = 1, size = 256) {
   const c = document.createElement("canvas"); c.width = c.height = size;
   const g = c.getContext("2d"), img = g.createImageData(size, size), d = img.data;
   const blobs = [];
-  for (let i = 0; i < 22; i++) blobs.push([0.5 + (rand(i, seed) - 0.5) * 0.55, 0.5 + (rand(i, seed + 7) - 0.5) * (kind === "puff" ? 0.35 : 0.55), 0.09 + rand(i, seed + 3) * 0.16]);
+  for (let i = 0; i < 22; i++) blobs.push([0.5 + (rand(i, seed) - 0.5) * 0.55, 0.5 + (rand(i, seed + 7) - 0.5) * 0.55, 0.09 + rand(i, seed + 3) * 0.16]);
   for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
     const u = x / size, v = y / size, i = (y * size + x) * 4;
     const r = Math.hypot(u - 0.5, v - 0.5) * 2;
     let a = 0, cr = 255, cg = 255, cb = 255;
     if (kind === "glow") {
       a = Math.exp(-r * r * 5) * 0.9 + Math.exp(-r * r * 40) * 0.6;
-    } else if (kind === "puff") {
-      // Fair-weather cumulus: billowing tops, a flat base, lit from above
-      // with a grey-blue underside - not the round cotton balls of before.
-      // a dome of lumps resting on a flat base, sharper edges at the top
-      let m = 0;
-      for (let k = 0; k < 26; k++) {
-        const bx = 0.18 + rand(k, seed) * 0.64, base = 0.62;
-        const hgt = 0.18 + 0.3 * Math.sin(Math.PI * (bx - 0.18) / 0.64) * (0.6 + 0.4 * rand(k, seed + 4));
-        const by = base - hgt * rand(k, seed + 9), br = 0.06 + rand(k, seed + 3) * 0.1;
-        const q = Math.hypot(u - bx, v - by) / br; m += Math.exp(-q * q * 2.4);
-      }
-      const n = fbmP(u * 14 + seed, v * 14, 14, 4);
-      a = smoothstep01((m + (n - 0.5) * 0.6 - 0.32) / 0.32);
-      a *= 1 - smoothstep01((v - 0.6) / 0.035);                    // flat base
-      const lit = clamp(1.0 - Math.max(0, v - 0.25) * 1.05 + (n - 0.5) * 0.18, 0.5, 1.0);
-      cr = 255 * lit * 0.96; cg = 255 * lit * 0.98; cb = 255 * Math.min(1, lit * 1.05);
+    } else if (kind === "glint") {
+      // a planet as a point of light: a hard bright core in a soft halo
+      a = Math.min(1, Math.exp(-r * r * 90) * 1.0 + Math.exp(-r * r * 14) * 0.45 + Math.exp(-r * r * 4) * 0.12);
     } else if (kind === "smoke") {
       let m = 0;
       for (const [bx, by, br] of blobs) { const q = Math.hypot(u - bx, v - by) / br; m += Math.exp(-q * q * 1.6); }
@@ -857,37 +1090,107 @@ function spriteTexture(kind, seed = 1, size = 256) {
  * version wrapped each planet in a bigger additive shell, which is what read
  * as a hard bluish "shield" line floating around it. */
 const GLSL_RING = /* glsl */ `
-  float ringAlpha(float x) {
-    float a = 0.58 + 0.22 * sin(x * 37.0) * sin(x * 13.0 + 1.0) + 0.08 * sin(x * 91.0 + 2.0);
-    a *= 1.0 - 0.92 * (1.0 - smoothstep(0.0, 0.022, abs(x - 0.63)));   // Cassini division
-    a *= mix(0.3, 1.0, smoothstep(0.08, 0.22, x));                      // faint inner C ring
-    a *= smoothstep(0.0, 0.03, x) * (1.0 - smoothstep(0.95, 1.0, x));
+  // Ring opacity across the span (x: 0 inner edge .. 1 outer edge): the C, B
+  // and A rings, the Cassini division and the Encke gap, plus fine ringlets
+  // that fade out with the screen-space footprint so they never alias.
+  float ringAlpha(float x, float fw) {
+    float a = mix(0.18, 0.92, smoothstep(0.12, 0.3, x));               // faint C ring, dense B ring
+    a *= mix(1.0, 0.72, smoothstep(0.66, 0.72, x));                     // A ring is thinner
+    a *= 1.0 - 0.93 * (1.0 - smoothstep(0.0, 0.025, abs(x - 0.63)));   // Cassini division
+    a *= 1.0 - 0.7 * (1.0 - smoothstep(0.0, 0.006, abs(x - 0.9)));     // Encke gap
+    float k1 = 1.0 - smoothstep(0.004, 0.02, fw), k2 = 1.0 - smoothstep(0.0015, 0.007, fw);
+    a *= 1.0 + 0.2 * sin(x * 37.0) * sin(x * 13.0 + 1.0) + 0.1 * k1 * sin(x * 160.0 + 2.0) * sin(x * 71.0);
+    a *= 1.0 + 0.16 * k2 * sin(x * 640.0 + sin(x * 90.0) * 3.0);
+    a *= smoothstep(0.0, 0.03, x) * (1.0 - smoothstep(0.96, 1.0, x));
     return clamp(a, 0.0, 1.0);
   }
-  vec3 ringColor(float x) { return mix(vec3(0.66, 0.55, 0.4), vec3(0.9, 0.82, 0.66), 0.5 + 0.5 * sin(x * 11.0 + 0.7)); }
+  vec3 ringColor(float x) {
+    vec3 c = mix(vec3(0.5, 0.42, 0.33), vec3(0.8, 0.7, 0.55), smoothstep(0.1, 0.45, x));
+    c = mix(c, vec3(0.66, 0.6, 0.52), smoothstep(0.64, 0.75, x));
+    return c * (0.92 + 0.08 * sin(x * 23.0 + 0.7));
+  }
 `;
-function planetMaterial({ map = null, color = 0xffffff, rim = 0x000000, rimK = 0, limb = 0, band = 0, ring = null }) {
+/* uSoft (0 near .. 1 far) is how the planets come out of the distance: far off
+ * a body is a blurred, soft-edged disc (texture sampled at a coarser mip, limb
+ * fading out), and it sharpens as the ship closes in. uKind picks the detail
+ * layer that keeps the low-resolution maps from looking blurry up close:
+ * 1 = rocky (cratered relief and mottling, as bump and albedo), 2 = banded gas
+ * giant (turbulent streaks along the belts). It is computed in object space,
+ * so it has no seam or pole pinch. */
+function planetMaterial({ map = null, color = 0xffffff, rim = 0x000000, rimK = 0, limb = 0, band = 0, ring = null, kind = 0, detailFreq = 6 }) {
   return new THREE.ShaderMaterial({
     uniforms: {
       uMap: { value: map }, uHasMap: { value: map ? 1 : 0 }, uColor: { value: new THREE.Color(color) },
       uSunDir: { value: sunDir }, uRim: { value: new THREE.Color(rim) }, uRimK: { value: rimK }, uLimb: { value: limb }, uBand: { value: band },
       uOpacity: { value: 1 }, uCenter: { value: new THREE.Vector3() }, uRingN: { value: new THREE.Vector3(0, 1, 0) },
       uRing: { value: new THREE.Vector2(ring ? ring[0] : 0, ring ? ring[1] : 0) }, uRingOn: { value: ring ? 1 : 0 }, uAlbedo: { value: 1 },
+      uSoft: { value: 0 }, uKind: { value: kind }, uFreq: { value: detailFreq }, uBumpA: { value: 0.1 },
     },
     vertexShader: /* glsl */ `
-      varying vec2 vUv; varying vec3 vN; varying vec3 vWP;
-      void main() { vUv = uv; vN = normalize(mat3(modelMatrix) * normal); vec4 wp = modelMatrix * vec4(position, 1.0); vWP = wp.xyz; gl_Position = projectionMatrix * viewMatrix * wp; }`,
+      varying vec2 vUv; varying vec3 vN; varying vec3 vWP; varying vec3 vO;
+      void main() {
+        vUv = uv; vO = normalize(position); vN = normalize(mat3(modelMatrix) * normal);
+        vec4 wp = modelMatrix * vec4(position, 1.0); vWP = wp.xyz; gl_Position = projectionMatrix * viewMatrix * wp;
+      }`,
     fragmentShader: /* glsl */ `
       uniform sampler2D uMap; uniform float uHasMap; uniform vec3 uColor; uniform vec3 uSunDir; uniform vec3 uRim; uniform float uRimK;
       uniform float uLimb; uniform float uBand; uniform float uOpacity; uniform vec3 uCenter; uniform vec3 uRingN; uniform vec2 uRing; uniform float uRingOn; uniform float uAlbedo;
-      varying vec2 vUv; varying vec3 vN; varying vec3 vWP;
+      uniform float uSoft; uniform int uKind; uniform float uFreq; uniform float uBumpA;
+      varying vec2 vUv; varying vec3 vN; varying vec3 vWP; varying vec3 vO;
       ${GLSL_NOISE}
       ${GLSL_RING}
+      // craters: one per noise cell (some cells empty), a bowl with a raised
+      // rim. Radii stay under half a cell, so only the 2x2x2 cells on the
+      // pixel's side of each axis can reach it.
+      float craters(vec3 p) {
+        vec3 i = floor(p), f = fract(p), s = step(0.5, f) - 1.0; float h = 0.0;
+        for (int z = 0; z < 2; z++) for (int y = 0; y < 2; y++) for (int x = 0; x < 2; x++) {
+          vec3 g = s + vec3(float(x), float(y), float(z));
+          vec3 c = i + g;
+          float r = 0.1 + 0.2 * hash13(c + 73.0);
+          float d = length(g + vec3(hash13(c), hash13(c + 17.0), hash13(c + 41.0)) * 0.9 + 0.05 - f) / r;
+          if (hash13(c + 91.0) < 0.6 && d < 1.45) h += d < 1.0 ? (d * d - 1.0) * 0.6 : (1.45 - d) * (d - 1.0) * 2.2;
+        }
+        return h;
+      }
+      float relief(vec3 q) { return craters(q) + vn3(q * 5.0) * 0.35; }
       void main() {
         vec3 N = normalize(vN), L = normalize(uSunDir), V = normalize(cameraPosition - vWP);
-        vec3 alb = (uHasMap > 0.5 ? texture2D(uMap, vUv).rgb : uColor) * uAlbedo;
-        alb *= 1.0 + uBand * (fbm2(vec2(vUv.x * 18.0, vUv.y * 260.0)) - 0.5);
-        float ndl = dot(N, L), ndv = max(dot(N, V), 0.0);
+        float detail = 1.0 - uSoft;
+        vec2 uv = vUv;
+        if (uKind == 2) {
+          // gas giant: warp the low-resolution map along the flow, so the
+          // band edges break into eddies and festoons instead of a soft blur
+          vec3 q = vO * uFreq;
+          vec2 w = vec2(fbm3(q * vec3(2.0, 9.0, 2.0)), fbm3(q * vec3(2.0, 9.0, 2.0) + 7.3)) - 0.5;
+          float shear = sin(vO.y * 40.0 + w.x * 4.0);
+          uv += detail * vec2(w.x * 0.012 + shear * 0.002, w.y * 0.0045);
+        }
+        vec3 alb = (uHasMap > 0.5 ? texture2D(uMap, uv, uSoft * 3.5).rgb : uColor) * uAlbedo;
+        if (uKind == 2) {
+          vec3 q = vO * uFreq;
+          float streak = fbm3(vec3(q.x * 1.5, vO.y * uFreq * 26.0 + fbm3(q * 3.0) * 2.5, q.z * 1.5));
+          alb *= 1.0 + detail * (0.2 * (streak - 0.5) + uBand * (fbm2(vec2(vUv.x * 18.0, vUv.y * 260.0)) - 0.5));
+          alb = mix(alb, pow(alb, vec3(1.18)) * 1.12, detail);       // a little more contrast up close
+        } else if (uKind == 1) {
+          // rocky: mottled albedo and cratered relief, lit as a bump
+          vec3 q = vO * uFreq;
+          float m = fbm3l(q * 1.7);
+          alb *= 1.0 + detail * (0.34 * (m - 0.5) + 0.12 * (vn3(q * 9.0) - 0.5) - 0.1 * clamp(-craters(q * 2.7 + 5.0), 0.0, 1.0));
+          if (detail > 0.02) {
+            // bump from screen-space derivatives of one relief sample (the
+            // surface-gradient method): a third of the cost of finite differences
+            float h0 = relief(q);
+            float hW = h0 * uBumpA * detail;
+            vec3 dpx = dFdx(vWP), dpy = dFdy(vWP);
+            vec3 r1 = cross(dpy, N), r2 = cross(N, dpx);
+            float det = dot(dpx, r1);
+            vec3 grad = sign(det) * (dFdx(hW) * r1 + dFdy(hW) * r2);
+            N = normalize(abs(det) * N - grad);
+            alb *= 1.0 - 0.16 * detail * clamp(-h0, 0.0, 1.0);
+          }
+        }
+        float ndl = dot(N, L), ndv = max(dot(normalize(vN), V), 0.0);
         alb *= mix(1.0, pow(ndv, 0.45), uLimb);
         float shade = 1.0;
         if (uRingOn > 0.5) {
@@ -896,14 +1199,16 @@ function planetMaterial({ map = null, color = 0xffffff, rim = 0x000000, rimK = 0
             float t = dot(uCenter - vWP, uRingN) / den;
             if (t > 0.0) {
               float rr = length(vWP + L * t - uCenter);
-              if (rr > uRing.x && rr < uRing.y) shade *= 1.0 - 0.8 * ringAlpha((rr - uRing.x) / (uRing.y - uRing.x));
+              if (rr > uRing.x && rr < uRing.y) shade *= 1.0 - 0.8 * ringAlpha((rr - uRing.x) / (uRing.y - uRing.x), 0.05);
             }
           }
         }
         float wrap = max((ndl + 0.1) / 1.1, 0.0);
         vec3 col = alb * (1.15 * wrap * shade + 0.025);
         col += uRim * pow(1.0 - ndv, 3.0) * smoothstep(-0.2, 0.5, ndl) * uRimK;
-        gl_FragColor = vec4(col, uOpacity);
+        // far away: a soft edge instead of a hard limb
+        float a = uOpacity * mix(1.0, smoothstep(0.0, 0.75, ndv), uSoft);
+        gl_FragColor = vec4(col, a);
         #include <tonemapping_fragment>
         #include <colorspace_fragment>
       }`,
@@ -924,16 +1229,22 @@ function ringMaterial(planetR, ring) {
       void main() {
         float rr = length(vWP - uCenter); float x = (rr - uRing.x) / (uRing.y - uRing.x);
         if (x < 0.0 || x > 1.0) discard;
+        float fw = fwidth(x);
         vec3 L = normalize(uSunDir);
         vec3 oc = vWP - uCenter; float b = dot(oc, L); float h = b * b - (dot(oc, oc) - uPR * uPR);
         float sh = (h > 0.0 && -b - sqrt(h) > 0.0) ? 0.07 : 1.0;    // in the planet's shadow
-        float lit = 0.4 + 0.6 * abs(dot(uRingN, L));
-        vec3 col = ringColor(x) * (1.05 * lit * sh + 0.02);
-        gl_FragColor = vec4(col, ringAlpha(x) * 0.78 * uOpacity);
+        // lit side vs. the unlit face (light diffusing through the ring)
+        vec3 V = normalize(cameraPosition - vWP);
+        float sameSide = step(0.0, dot(uRingN, L) * dot(uRingN, V));
+        float lit = mix(0.35, 0.4 + 0.6 * abs(dot(uRingN, L)), sameSide);
+        float al = ringAlpha(x, fw) * 0.85 * uOpacity;
+        if (al < 0.08) discard;          // the gaps write no depth; the ring itself hides the stars behind it
+        vec3 col = ringColor(x) * (0.92 * lit * sh + 0.02);
+        gl_FragColor = vec4(col, al);
         #include <tonemapping_fragment>
         #include <colorspace_fragment>
       }`,
-    transparent: true, depthWrite: false, side: THREE.DoubleSide, forceSinglePass: true,
+    transparent: true, depthWrite: true, side: THREE.DoubleSide, forceSinglePass: true,
   });
 }
 function starMaterial(color) {
@@ -1013,27 +1324,35 @@ function makeSpriteBatch({ count, map, additive = false, lit = false, nearFade =
   return batch;
 }
 
-/* Soft round point sprites with size attenuation clamped in pixels (the old
- * PointsMaterial squares blew up into big flat tiles near the camera). */
+/* Soft round point sprites, anti-aliased at every size. A point's falloff is
+ * computed in PIXELS from its centre, with a floor on the blur radius and two
+ * pixels of padding, so a star that projects to 1-3 px is still a soft round
+ * dot rather than a 1x1 or 2x2 square (an even-sized sprite with a falloff in
+ * sprite units lights a hard 2x2 block). Sub-pixel points shed brightness in
+ * proportion to their area instead of flickering or vanishing. */
 function softPointsMaterial({ opacity = 1, maxPx = 24, additive = true }) {
   const m = new THREE.ShaderMaterial({
     uniforms: { uScale: { value: pointScale }, uMaxPx: { value: maxPx }, uOpacity: { value: opacity } },
     vertexShader: /* glsl */ `
       attribute float aSize; attribute vec3 color; uniform float uScale; uniform float uMaxPx;
-      varying vec3 vC; varying float vFade;
+      varying vec3 vC; varying float vAmp; varying float vSig; varying float vSize;
       void main() {
         vec4 mv = modelViewMatrix * vec4(position, 1.0);
-        float px = aSize * uScale / max(-mv.z, 0.001);
-        gl_PointSize = clamp(px, 1.0, uMaxPx);
-        vFade = clamp(px, 0.0, 1.0);          // sub-pixel points dim instead of flickering
+        float px = min(aSize * uScale / max(-mv.z, 0.001), uMaxPx);
+        vSig = max(px * 0.3, 0.62);                       // blur radius in pixels, never below ~1px FWHM
+        vSize = ceil(vSig * 6.0 + 2.0);                   // covers the falloff, plus AA padding
+        // brightness: full above ~1.5 px, by area below (a 0.5px star is a quarter as bright)
+        vAmp = clamp(px * px / 2.25, 0.0, 1.0);
+        gl_PointSize = vSize;
         vC = color; gl_Position = projectionMatrix * mv;
       }`,
     fragmentShader: /* glsl */ `
-      uniform float uOpacity; varying vec3 vC; varying float vFade;
+      uniform float uOpacity; varying vec3 vC; varying float vAmp; varying float vSig; varying float vSize;
       void main() {
-        vec2 d = gl_PointCoord - 0.5; float r = length(d) * 2.0;
-        if (r > 1.0) discard;
-        float a = (exp(-r * r * 4.5) * 0.85 + exp(-r * r * 28.0) * 0.5) * uOpacity * vFade;
+        float d = length(gl_PointCoord - 0.5) * vSize;   // distance from the centre in pixels
+        float g = exp(-0.5 * d * d / (vSig * vSig));
+        float a = (g * 0.9 + exp(-0.5 * d * d / (vSig * vSig * 5.0)) * 0.12) * vAmp * uOpacity;
+        if (a < 0.002) discard;
         gl_FragColor = vec4(vC, a);
         #include <tonemapping_fragment>
         #include <colorspace_fragment>
@@ -1107,25 +1426,84 @@ function makePadProps() {
   padProps = g;
 }
 let padProps = null;
+/* The rest of the Kennedy Space Center skyline (lib/ksc.js): the Vehicle
+ * Assembly Building with its flag and insignia at the end of the crawlerway,
+ * the Launch Control Center beside it, an orbiter hangar - all pulled in from
+ * their real ~5 km for the frame - and the press-site countdown clock in the
+ * foreground, counting down with the scroll and up again after liftoff. */
+let kscGroup = null, countdown = null;
+const CW_YAW = -0.559;   // the crawlerway's heading: -X turned toward the north-west (matches terrainEarth's frame)
+function makeKSC() {
+  const ksc = makeKSCBuildings({ groundY: 0 });
+  kscGroup = ksc.group;
+  // at the far end of the crawlerway, which runs west-north-west (CW_YAW), doors to the pad
+  kscGroup.position.set(-140 * Math.cos(CW_YAW), Y_G, 140 * Math.sin(CW_YAW));
+  kscGroup.rotation.y = CW_YAW;
+  scene.add(kscGroup);
+  countdown = ksc.parts.clock;
+  scene.add(countdown);
+  countdown.position.set(0.4, Y_G, 10.7);
+  countdown.rotation.y = Math.atan2(14 - 0.4, 17 - 10.7);   // face the opening camera
+  countdown.scale.setScalar(1.3);
+}
+// Mission time from scroll: ten seconds of countdown before ignition, then
+// T+ at the real pace of the ascent (booster separation lands at T+2:04).
+/* The stack holds on the pad through the count (path parameter 0), lifts off
+ * at T-0 and accelerates away, joining the timeline exactly - position and
+ * rate - at LIFT_JOIN, so nothing later in the voyage moves. */
+const LIFTOFF = 0.008, LIFT_JOIN = 0.03;
+function shipP(p) {
+  if (p <= LIFTOFF) return 0;
+  if (p >= LIFT_JOIN) return p;
+  const x = (p - LIFTOFF) / (LIFT_JOIN - LIFTOFF);
+  return LIFT_JOIN * x * x * (2.267 - 1.267 * x);    // g(0)=0, g'(0)=0; g(1)=1, slope matched at the join
+}
+function missionTime(p) { return p < 0.008 ? -10 + (p / 0.008) * 10 : (p - 0.008) * (124 / (P.boostA - 0.008)); }
 function placeCrawler(root) {
   crawler = new THREE.Group(); crawler.add(root);
   crawler.scale.setScalar(0.407);
-  crawler.position.set(-26, Y_G + 0.22 * 0.407, -1.7);
+  crawler.position.set(-26, Y_G + 0.22 * 0.407, -1.7).applyAxisAngle(UP, CW_YAW);
+  crawler.rotation.y = CW_YAW;
   scene.add(crawler);
 }
 
 /* --- Bodies ---------------------------------------------------------------- *
  * `mode` is how the flight meets each one: "below" passes over it, "around"
- * swings round it on the inside of the path's curve, "side" passes beside it. */
+ * swings round it on the inside of the path's curve, "side" passes beside it,
+ * "rings" skims low over its ring plane. Sizes are not to scale but keep the
+ * real order (Jupiter > Saturn > Uranus ~ Neptune > Mars > Moon > Pluto).
+ * `glint` is the colour of the body as a point of light, before it resolves. */
 const BODY_DEFS = [
-  { key: "moon", pos: [40, 14, -220], r: 18, tex: "moon", spin: 0.02, mode: "around", limb: 0.15, albedo: 0.62 },
-  { key: "mars", pos: [-40, 12, -345], r: 9, tex: "mars", spin: 0.05, mode: "below", rim: 0xe0a080, rimK: 0.3 },
-  { key: "jupiter", pos: [46, -14, -610], r: 48, tex: "jupiter", spin: 0.03, mode: "around", limb: 0.55, band: 0.1, rim: 0xe6d2a8, rimK: 0.12 },
-  { key: "saturn", pos: [-70, 20, -870], r: 38, tex: "saturn", spin: 0.03, ring: [50, 86], mode: "below", limb: 0.5, band: 0.06 },
-  { key: "uranus", pos: [56, 30, -1060], r: 24, tex: "uranus", spin: 0.04, mode: "side", limb: 0.3, rim: 0xa8f0f6, rimK: 0.35 },
-  { key: "neptune", pos: [-34, -16, -1200], r: 24, tex: "neptune", spin: 0.04, mode: "side", limb: 0.4, rim: 0x6a9cff, rimK: 0.4 },
-  { key: "pluto", pos: [24, 8, -1430], r: 7, tex: "pluto", spin: 0.02, mode: "below" },
+  { key: "moon", pos: [40, 14, -220], r: 18, tex: "moon", spin: 0.02, mode: "around", limb: 0.15, albedo: 0.62, kind: 1, freq: 7, glint: 0xdcdcdc },
+  { key: "mars", pos: [-40, 12, -345], r: 22, tex: "mars", spin: 0.05, mode: "below", rim: 0xe0a080, rimK: 0.3, kind: 1, freq: 5, glint: 0xffa070 },
+  { key: "jupiter", pos: [46, -14, -610], r: 48, tex: "jupiter", spin: 0.03, mode: "around", limb: 0.55, band: 0.1, rim: 0xe6d2a8, rimK: 0.12, kind: 2, freq: 3, glint: 0xf2d6ae },
+  { key: "saturn", pos: [-70, 20, -870], r: 38, tex: "saturn", spin: 0.03, ring: [50, 86], mode: "rings", limb: 0.5, band: 0.06, kind: 2, freq: 3, glint: 0xf6e2b4 },
+  { key: "uranus", pos: [56, 30, -1060], r: 28, tex: "uranus", spin: 0.04, mode: "side", limb: 0.3, rim: 0xa8f0f6, rimK: 0.35, kind: 2, freq: 2.5, tilt: 1.71, glint: 0xc4f4f8 },
+  { key: "neptune", pos: [-34, -16, -1200], r: 27, tex: "neptune", spin: 0.04, mode: "side", limb: 0.4, rim: 0x6a9cff, rimK: 0.4, kind: 2, freq: 2.5, glint: 0x84a8ff },
+  { key: "pluto", pos: [24, 8, -1430], r: 8, tex: "pluto", spin: 0.02, mode: "below", kind: 1, freq: 6, glint: 0xead6bc },
 ];
+/* Moons and minor bodies: placed relative to a parent once it is placed (or
+ * absolutely), then pushed clear of the flight path. Offsets for Saturn's
+ * moons are in its ring plane: [along the flight, out from Saturn toward the
+ * path, 0]. */
+const MINOR_DEFS = [
+  { key: "phobos", parent: "mars", off: [-40, 6, 34], r: 1.6, tex: "phobos", kind: 1, freq: 9, glint: 0xb8a898 },
+  { key: "deimos", parent: "mars", off: [-95, 10, 50], r: 1.1, tex: "deimos", kind: 1, freq: 9, glint: 0xc8b8a8 },
+  { key: "ceres", pos: [44, -2, -400], r: 4, color: 0x8a8780, kind: 1, freq: 8, glint: 0xb0aca4, vis: [0.28, 0.33, 0.41, 0.46] },
+  { key: "vesta", pos: [-14, 12, -462], r: 3, color: 0xb9b1a4, kind: 1, freq: 8, glint: 0xd0c8bc, vis: [0.3, 0.35, 0.42, 0.47] },
+  { key: "io", parent: "jupiter", off: [-30, 3, 57], r: 3.8, tex: "io", kind: 1, freq: 6, glint: 0xf0e080 },
+  { key: "europa", parent: "jupiter", off: [-90, -4, -30], r: 3.2, tex: "europa", kind: 1, freq: 5, glint: 0xf0ece0 },
+  { key: "ganymede", parent: "jupiter", off: [35, 10, -125], r: 5.4, tex: "ganymede", kind: 1, freq: 6, glint: 0xd8d0c4 },
+  { key: "callisto", parent: "jupiter", off: [110, -8, -120], r: 5.0, tex: "callisto", kind: 1, freq: 6, glint: 0xa89c8c },
+  { key: "titan", parent: "saturn", ringOff: [170, -90], r: 5.2, tex: "titan", kind: 0, glint: 0xf0c070 },
+  { key: "enceladus", parent: "saturn", ringOff: [110, -20], r: 1.9, tex: "enceladus", kind: 1, freq: 7, glint: 0xffffff, albedo: 1.1 },
+  { key: "triton", parent: "neptune", off: [-30, -18, -52], r: 4, tex: "triton", kind: 1, freq: 6, glint: 0xf0dcd4 },
+  { key: "charon", parent: "pluto", off: [26, -3, -9], r: 4, tex: "charon", kind: 1, freq: 7, glint: 0xc8c0b8 },
+  { key: "makemake", pos: [-48, 12, -1445], r: 4.2, color: 0xb5785a, kind: 1, freq: 6, glint: 0xd09070, vis: [0.5, 0.56, 0.63, 0.69] },
+  { key: "haumea", pos: [60, -18, -1340], r: 4.2, color: 0xf2f4f8, kind: 1, freq: 6, glint: 0xffffff, scale: [2, 1, 1], vis: [0.48, 0.54, 0.6, 0.66] },
+  { key: "eris", pos: [-110, 30, -1560], r: 6.8, color: 0xe8eef2, kind: 1, freq: 6, glint: 0xf4f8ff, vis: [0.52, 0.58, 0.66, 0.72] },
+];
+const SATURN_P = pAt(8);
 const FEATURES = [
   { key: "moon", pAt: pAt(5), w: 0.05, strength: 0.6 },
   { key: "mars", pAt: pAt(6) - 0.015, w: 0.035, strength: 0.4 },
@@ -1135,42 +1513,46 @@ const FEATURES = [
   { key: "neptune", pAt: pAt(9) + 0.03, w: 0.04, strength: 0.45 },
   { key: "pluto", pAt: pAt(10), w: 0.045, strength: 0.4 },
   { key: "star", pAt: 0.9, w: 0.045, strength: 0.5 },
-  { key: "earth", pAt: 0.225, w: 0.06, strength: 0.5, pos: new THREE.Vector3() },   // look back at the receding planet
+  { key: "earth", pAt: 0.228, w: 0.07, strength: 1.15, pos: new THREE.Vector3() },   // look back at the receding planet
   { key: "kepler", pAt: 0.948, w: 0.04, strength: 0.65, pos: new THREE.Vector3() },  // the destination, ahead on approach
 ];
 const EARTH_FEATURE = FEATURES.find((f) => f.key === "earth");
 const VIS = {
-  moon: [0.0, 0.06, 0.34, 0.44], mars: [0.26, 0.32, 0.41, 0.47], jupiter: [0.33, 0.39, 0.47, 0.53],
-  saturn: [0.39, 0.45, 0.53, 0.59], uranus: [0.45, 0.51, 0.58, 0.64], neptune: [0.48, 0.54, 0.61, 0.67],
-  pluto: [0.53, 0.58, 0.65, 0.71], star: [0.74, 0.84, 1.01, 1.02],
+  moon: [0.17, 0.2, 0.34, 0.44], mars: [0.2, 0.26, 0.41, 0.47], jupiter: [0.27, 0.33, 0.47, 0.53],
+  saturn: [0.33, 0.39, 0.53, 0.59], uranus: [0.4, 0.46, 0.58, 0.64], neptune: [0.43, 0.49, 0.61, 0.67],
+  pluto: [0.48, 0.54, 0.65, 0.71], star: [0.6, 0.8, 1.01, 1.02],
 };
 const bodies = {};
 const textures = {};
-function makeBody(def) {
+function makeBody(def, minor = false) {
   const g = new THREE.Group();
-  const mat = planetMaterial({ map: textures[def.tex], rim: def.rim || 0, rimK: def.rimK || 0, limb: def.limb || 0, band: def.band || 0, ring: def.ring });
+  const mat = planetMaterial({ map: textures[def.tex] || null, color: def.color || 0xffffff, rim: def.rim || 0, rimK: def.rimK || 0, limb: def.limb || 0, band: def.band || 0, ring: def.ring, kind: def.kind || 0, detailFreq: def.freq || 6 });
   if (def.albedo) mat.uniforms.uAlbedo.value = def.albedo;
-  const mesh = new THREE.Mesh(new THREE.SphereGeometry(def.r, 96, 64), mat);
+  mat.uniforms.uBumpA.value = def.r * 0.012 / Math.max(1, (def.freq || 6) / 6);   // relief height in world units
+  const res = minor ? [48, 32] : [128, 96];
+  const mesh = new THREE.Mesh(new THREE.SphereGeometry(def.r, res[0], res[1]), mat);
+  if (def.scale) mesh.scale.set(...def.scale);
   g.add(mesh);
   let ring = null;
   if (def.ring) {
-    ring = new THREE.Mesh(new THREE.RingGeometry(def.ring[0], def.ring[1], 160, 1), ringMaterial(def.r, def.ring));
-    ring.rotation.x = -Math.PI / 2 + 0.38; ring.rotation.y = 0.2;
+    // flat in the planet's equatorial (local XZ) plane; the group carries the tilt
+    ring = new THREE.Mesh(new THREE.RingGeometry(def.ring[0], def.ring[1], 256, 1), ringMaterial(def.r, def.ring));
+    ring.rotation.x = -Math.PI / 2;
     g.add(ring);
   }
+  if (def.tilt) g.rotation.z = def.tilt;
+  g.visible = false;
   scene.add(g);
-  bodies[def.key] = { group: g, mesh, mat, ring, pos: new THREE.Vector3(...def.pos), r: def.r, spin: def.spin || 0, def };
+  bodies[def.key] = { group: g, mesh, mat, ring, pos: new THREE.Vector3(...(def.pos || [0, 0, 0])), r: def.r, spin: def.spin || 0.01, def,
+    dClose: 30, glint: new THREE.Color(def.glint || 0xffffff), vis: def.vis || null, ringBase: new THREE.Vector2(...(def.ring || [0, 0])) };
 }
 let starGlow = null;
 function makeStar() {
   const g = new THREE.Group();
-  const mat = starMaterial(0xffd9a0);
+  const mat = starMaterial(0xfff0d8);                 // Kepler-452: a G2V star, ~5,760 K - yellow-white, like the Sun
   const mesh = new THREE.Mesh(new THREE.SphereGeometry(42, 64, 48), mat);
   g.add(mesh);
   starGlow = makeSpriteBatch({ count: 2, map: spriteTexture("glow", 3, 128), additive: true, renderOrder: FX_ORDER });
-  starGlow.set(0, 0, 0, 0, 42 * 9, 0, 1.0, 0.82, 0.55, 0.85);
-  starGlow.set(1, 0, 0, 0, 42 * 3.2, 0, 1.0, 0.95, 0.85, 1.0);
-  starGlow.upload();
   scene.add(starGlow.mesh);
   scene.add(g);
   bodies.star = { group: g, mesh, mat, pos: new THREE.Vector3(10, 4, -3320), r: 42, spin: 0, def: { key: "star" } };
@@ -1181,12 +1563,29 @@ function makeStar() {
  * push it outward until both clear it. (Placing against the chapter point alone
  * let the path curve back through Jupiter.) */
 const _pp = new THREE.Vector3(), _tn = new THREE.Vector3(), _dr = new THREE.Vector3(), _tA = new THREE.Vector3(), _tB = new THREE.Vector3();
+const RING_PASS = { rho: 66, h: 6.5 };   // Saturn: radius over the rings and height above their plane at closest approach
 function placeBodies() {
   for (const f of FEATURES) {
     const body = bodies[f.key]; if (!body || f.key === "star") continue;
     const def = body.def, r = body.r;
     const at = clamp(f.pAt, 0, 1);
     path.getPoint(at, _pp); safeTangent(at, _tn);
+    if (def.mode === "rings") {
+      /* Over the rings: the ring plane is laid along the flight (its normal is
+       * the path's local "up", rolled a little for a sense of tilt), and the
+       * planet sits beside and below so the ship crosses the B and A rings a
+       * few units above them. */
+      const up = new THREE.Vector3(0, 1, 0).addScaledVector(_tn, -_tn.y).normalize();
+      const side = new THREE.Vector3().crossVectors(_tn, up).normalize();
+      const n = up.clone().applyAxisAngle(_tn, -0.16).normalize();
+      _dr.copy(side).negate().addScaledVector(n, -side.clone().negate().dot(n)).normalize();   // toward the planet, in the ring plane
+      body.pos.copy(_pp).addScaledVector(n, -RING_PASS.h).addScaledVector(_dr, RING_PASS.rho);
+      body.ringN = n; body.ringE1 = _dr.clone().negate(); body.ringE2 = _tn.clone().addScaledVector(n, -_tn.dot(n)).normalize();
+      body.group.quaternion.setFromUnitVectors(UP, n);
+      body.group.position.copy(body.pos);
+      f.pos = body.pos;
+      continue;
+    }
     if (def.mode === "below") {
       _dr.set(0, -1, 0).addScaledVector(_tn, _tn.y).normalize();
     } else if (def.mode === "around") {
@@ -1203,19 +1602,105 @@ function placeBodies() {
     const ahead = def.mode === "side" ? r * 2.6 : r * 0.9;
     const off = def.mode === "side" ? r * 1.7 : visR + Math.max(6, r * 0.35);
     body.pos.copy(_pp).addScaledVector(_tn, ahead).addScaledVector(_dr, off);
-    // clearance against the real ship and camera positions
-    const need = visR + Math.max(5, visR * 0.15);
-    const w = VIS[f.key] || [at - 0.1, at - 0.1, at + 0.1, at + 0.1];
-    const near = clearanceSamples().filter((s) => s.p >= w[0] && s.p <= w[3]);
-    for (let i = 0; i < 80; i++) {
-      let min = Infinity;
-      for (const s of near) min = Math.min(min, s.ship.distanceTo(body.pos), s.cam.distanceTo(body.pos));
-      if (min >= need) break;
-      body.pos.addScaledVector(_dr, visR * 0.08);
-    }
+    pushClear(body, visR + Math.max(5, visR * 0.15), VIS[f.key] || [at - 0.1, at - 0.1, at + 0.1, at + 0.1], _dr);
     body.group.position.copy(body.pos);
     f.pos = body.pos;
   }
+  for (const def of MINOR_DEFS) {
+    const body = bodies[def.key]; if (!body) continue;
+    const par = def.parent ? bodies[def.parent] : null;
+    if (par && def.ringOff) body.pos.copy(par.pos).addScaledVector(par.ringE2, def.ringOff[0]).addScaledVector(par.ringE1, def.ringOff[1]);
+    else if (par) body.pos.copy(par.pos).add(new THREE.Vector3(...def.off));
+    body.vis = body.vis || VIS[def.parent];
+    const w = body.vis;
+    // push away from the nearest point of the path in its window
+    let best = Infinity, bp = 0;
+    for (const s of clearanceSamples()) if (s.p >= w[0] && s.p <= w[3]) { const d = s.ship.distanceTo(body.pos); if (d < best) { best = d; bp = s.p; } }
+    path.getPoint(bp, _pp); _dr.copy(body.pos).sub(_pp); if (_dr.lengthSq() < 1e-6) _dr.set(1, 0, 0); _dr.normalize();
+    pushClear(body, body.r + 9, w, _dr);
+    body.group.position.copy(body.pos);
+  }
+  // how close the chase camera gets to each body: the scale for its distance reveal
+  for (const k in bodies) {
+    const b = bodies[k]; if (k === "star") continue;
+    const w = b.vis || VIS[k]; let min = Infinity;
+    for (const s of clearanceSamples()) if (s.p >= w[0] && s.p <= w[3]) min = Math.min(min, s.cam.distanceTo(b.pos));
+    b.dClose = Math.max(min, b.r * 1.5);
+  }
+}
+function pushClear(body, need, w, dir) {
+  const near = clearanceSamples().filter((s) => s.p >= w[0] && s.p <= w[3]);
+  for (let i = 0; i < 120; i++) {
+    let min = Infinity;
+    for (const s of near) min = Math.min(min, s.ship.distanceTo(body.pos), s.cam.distanceTo(body.pos));
+    if (min >= need) break;
+    body.pos.addScaledVector(dir, Math.max(1, need * 0.08));
+  }
+}
+
+/* The distance reveal. Far off, a body is a point of light (a glint, its own
+ * colour); closing in, the disc fades up blurred and soft-edged and sharpens
+ * as the ship arrives; once passed, its chapter window fades it out. Measured
+ * against how close the camera will get (dClose), so a giant and a moonlet
+ * both resolve at the same point of their approach. */
+let glints = null;
+const _gp = new THREE.Vector3();
+/* Real-time perspective, exaggerated a little: a body is a point of light far
+ * off and swells to its designated size as the ship closes, then stays that
+ * size past closest approach and is dropped once its chapter is over. Its
+ * scale is a function of distance (relative to how near the camera will come,
+ * dClose), so the giant and the moonlet grow on the same schedule - on top of
+ * the ordinary shrinking of anything distant. Nothing is blurred or faded in:
+ * what you see far off is the same small world, getting bigger. The glint is
+ * only for the last pixels, before the disc resolves. */
+function bodyScale(ratio) {
+  return lerp(0.025, 1, Math.pow(seg(ratio, 11, 1.7), 2.2));
+}
+function updateBodies(p) {
+  let gi = 0;
+  for (const k in bodies) {
+    if (k === "star") continue;
+    const b = bodies[k], w = b.vis || VIS[k];
+    const win = Math.min(seg(p, w[0], w[1]), 1 - seg(p, w[2], w[3]));
+    const d = camera.position.distanceTo(b.pos);
+    const sc = bodyScale(d / b.dClose);
+    const rpx = (b.r * sc / Math.max(d, 1e-3)) * pointScale;       // apparent radius in pixels
+    const disc = win * smooth(seg(rpx, 0.8, 2.6));
+    b.group.visible = disc > 0.004;
+    if (b.group.visible) {
+      b.group.scale.setScalar(sc);
+      b.mat.uniforms.uOpacity.value = disc; b.mat.uniforms.uSoft.value = 0;
+      b.mat.depthWrite = disc > 0.98;
+      if (b.ring) {
+        // the ring and its shadow are measured in world units: scale them with the body
+        b.ring.material.uniforms.uOpacity.value = disc;
+        b.ring.material.uniforms.uRing.value.copy(b.ringBase).multiplyScalar(sc); b.ring.material.uniforms.uPR.value = b.r * sc;
+        b.mat.uniforms.uRing.value.copy(b.ringBase).multiplyScalar(sc);
+      }
+    }
+    if (!glints) continue;
+    const g = win * (1 - smooth(seg(rpx, 1.4, 3.2)));
+    if (g > 0.004 && gi < glints.count) {
+      const px = clamp(5 + rpx * 2.5, 5, 12);
+      const size = (d * px * 2.2) / pointScale;
+      const bright = 0.5 + 0.5 * smooth(seg(rpx, 0.2, 2));
+      glints.set(gi++, b.pos.x, b.pos.y, b.pos.z, size, 0, b.glint.r * bright, b.glint.g * bright, b.glint.b * bright, g);
+    }
+  }
+  if (glints) { for (let i = gi; i < glints.count; i++) glints.set(i, 0, 0, 0, 0, 0, 0, 0, 0, 0); glints.upload(); }
+}
+
+/* Chase camera offsets (behind, above, beside the ship). Tighter than before so
+ * the vehicle reads as the subject, and tighter again over Saturn's rings. */
+const CHASE = { back: 20, up: 5, side: 3.4 };
+function chaseOffset(p, out) {
+  const s = Math.exp(-Math.pow((p - SATURN_P) / 0.03, 2));
+  return out.set(lerp(CHASE.back, 13.5, s), lerp(CHASE.up, 3.4, s), lerp(CHASE.side, 2.6, s));
+}
+const _co = new THREE.Vector3();
+function chaseFrom(p, shipPos, t, r, out) {
+  chaseOffset(p, _co);
+  return out.copy(shipPos).addScaledVector(t, -_co.x).addScaledVector(UP, _co.y).addScaledVector(r, _co.z);
 }
 let _clearSamples = null;
 function clearanceSamples() {
@@ -1225,31 +1710,98 @@ function clearanceSamples() {
   for (let p = 0.2; p <= 0.951; p += 0.002) {
     const ship = path.getPoint(p, new THREE.Vector3());
     safeTangent(p, t); rightOf(t, r);
-    const cam = ship.clone().addScaledVector(t, -27).addScaledVector(UP, 7).addScaledVector(r, 5);
+    const cam = chaseFrom(p, ship, t, r, new THREE.Vector3());
     _clearSamples.push({ p, ship, cam });
   }
   return _clearSamples;
 }
 
 /* --- Belts, starfield, nebulae, galaxy ------------------------------------- */
-const fields = [];   // { obj, vis:[a,b], mats:[{m, op0, key}] }
-function addField(obj, vis, mats) { obj.visible = false; scene.add(obj); fields.push({ obj, vis, mats: mats.map((m) => ({ m, op0: m.uniforms ? m.uniforms.uOpacity.value : m.opacity })) }); }
+/* Fields (belts, clouds, nebulae) come out of the distance the same way the
+ * planets do: inside their chapter window, their own material is held faint
+ * while the camera is far (dGhost) and reaches full strength close in (dFull);
+ * an impostor - a soft glow in the field's colours - stands in for it from
+ * afar and dissolves as the ship flies in, so nothing pops up around the ship. */
+const fields = [];   // { obj, vis:[a,b], mats:[{m, op0}], center, dFull, dGhost, imp }
+function addField(obj, vis, mats, opt = {}) {
+  obj.visible = false; scene.add(obj);
+  const f = { obj, vis, mats: mats.map((m) => ({ m, op0: m.uniforms ? m.uniforms.uOpacity.value : m.opacity })),
+    center: opt.center ? new THREE.Vector3(...opt.center) : null, dFull: opt.dFull || 0, dGhost: opt.dGhost || 1, imp: null, impOp: 0 };
+  if (opt.impostor) {
+    const im = opt.impostor;
+    const b = makeSpriteBatch({ count: im.n || 3, map: im.map || nebulaTex[0], additive: true, renderOrder: FX_ORDER, nearFade: [0.2, 0.7] });
+    for (let i = 0; i < b.count; i++) {
+      const c = new THREE.Color(im.colors[i % im.colors.length]);
+      const o = im.spread || 0;
+      b.set(i, f.center.x + (rand(i, 301) - 0.5) * o, f.center.y + (rand(i, 302) - 0.5) * o * 0.5, f.center.z + (rand(i, 303) - 0.5) * o,
+        im.size * (0.7 + 0.5 * rand(i, 304)), rand(i, 305) * 6.3, c.r, c.g, c.b, im.alpha || 0.5);
+    }
+    b.upload(); b.mesh.visible = false; scene.add(b.mesh);
+    f.imp = b;
+  }
+  fields.push(f);
+  return f;
+}
 
 function rockGeometry(seed) {
-  const g = new THREE.IcosahedronGeometry(1, 2);
+  // lumpy, elongated, with a few impact dents; smooth-shaded so it reads as a
+  // rock, not a faceted gem, with crevices darkened and the surface speckled
+  // through vertex colour
+  // (polyhedra come unindexed: weld the vertices so the normals come out smooth)
+  const g0 = new THREE.IcosahedronGeometry(1, 3); g0.deleteAttribute("normal"); g0.deleteAttribute("uv");
+  const g = mergeVertices(g0);
   const p = g.getAttribute("position"), v = new THREE.Vector3();
+  const col = new Float32Array(p.count * 3);
+  const dents = [0, 1, 2, 3, 4, 5].map((k) => new THREE.Vector3(rand(k, seed * 3 + 1) - 0.5, rand(k, seed * 3 + 2) - 0.5, rand(k, seed * 3 + 3) - 0.5).normalize());
   for (let i = 0; i < p.count; i++) {
     v.fromBufferAttribute(p, i);
-    const n = 0.72 + 0.5 * fbmP(v.x * 1.7 + seed, v.y * 1.7 + v.z * 0.9, 64, 3);
-    v.multiplyScalar(n); v.x *= 1.25; p.setXYZ(i, v.x, v.y, v.z);
+    const big = fbmP(v.x * 1.4 + seed, v.y * 1.4 + v.z * 0.9, 64, 3);
+    const fine = fbmP(v.x * 6 + v.z * 3 + seed, v.y * 6 - v.z * 2, 64, 3);
+    let n = 0.68 + 0.46 * big + 0.16 * fine;
+    let dent = 0;
+    for (const d of dents) { const t = v.dot(d); if (t > 0.88) dent += Math.sin(((t - 0.88) / 0.12) * Math.PI) * (0.5 + 0.5 * rand(seed, t)); }
+    n -= 0.1 * dent;
+    v.multiplyScalar(n); v.x *= 1.3; v.z *= 0.88; p.setXYZ(i, v.x, v.y, v.z);
+    const shade = clamp(0.62 + 0.7 * (n - 0.95) + 0.25 * (fine - 0.5) - 0.12 * dent, 0.35, 1.15);
+    const speck = 0.9 + 0.2 * nHash(i * 7, seed * 13, 9973);
+    col.set([shade * speck, shade * speck * 0.97, shade * speck * 0.94], i * 3);
   }
+  g.setAttribute("color", new THREE.BufferAttribute(col, 3));
   g.computeVertexNormals();
   return g;
 }
-function makeBelt({ center, rIn, rOut, thick, rocks, dust, rockColor, dustColor, vis, rockSize }) {
+/* Keep a lane open along the flight path: a rock that would sit in it is
+ * pushed out sideways, so the ship threads the field instead of a boulder
+ * filling the screen. */
+const _lane = new THREE.Vector3();
+function clearLane(pos, need) {
+  let best = Infinity, bs = null;
+  for (const s of clearanceSamples()) { const d = s.ship.distanceToSquared(pos); if (d < best) { best = d; bs = s; } }
+  if (!bs || best >= need * need) return;
+  _lane.subVectors(pos, bs.ship); if (_lane.lengthSq() < 1e-6) _lane.set(1, 0.3, 0);
+  pos.copy(bs.ship).addScaledVector(_lane.normalize(), need);
+}
+/* Per-instance reveal with distance from the camera: a belt is a faint band of
+ * dust from afar and its rocks grow out of it one by one as the ship closes
+ * (scaled from nothing in the vertex shader - no transparency, so nothing to
+ * sort and no half-faded rock cutting a dark hole in the glow behind it). */
+function distanceFadeMaterial(mat, near, far) {
+  mat.userData.fade = { uFadeNear: { value: near }, uFadeFar: { value: far } };
+  mat.onBeforeCompile = (sh) => {
+    Object.assign(sh.uniforms, mat.userData.fade);
+    sh.vertexShader = sh.vertexShader.replace("#include <common>", "#include <common>\nuniform float uFadeNear; uniform float uFadeFar;")
+      .replace("#include <begin_vertex>", `#include <begin_vertex>
+        #ifdef USE_INSTANCING
+          vec3 icW = (modelMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+          transformed *= 1.0 - smoothstep(uFadeNear, uFadeFar, distance(icW, cameraPosition));
+        #endif`);
+  };
+  return mat;
+}
+function makeBelt({ center, rIn, rOut, thick, rocks, dust, rockColor, dustColor, vis, rockSize, glow }) {
   const grp = new THREE.Group();
-  const mat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.95, metalness: 0.05, flatShading: true, transparent: true });
-  const geos = [rockGeometry(1.3), rockGeometry(7.1), rockGeometry(4.4)];
+  const mat = distanceFadeMaterial(new THREE.MeshStandardMaterial({ color: 0xffffff, vertexColors: true, roughness: 0.96, metalness: 0.02, transparent: true }), 90, 240);
+  const geos = [rockGeometry(1.3), rockGeometry(7.1), rockGeometry(4.4), rockGeometry(9.7)];
   const dummy = new THREE.Object3D(), col = new THREE.Color();
   const per = Math.ceil(rocks / geos.length);
   geos.forEach((geo, gi) => {
@@ -1259,7 +1811,9 @@ function makeBelt({ center, rIn, rOut, thick, rocks, dust, rockColor, dustColor,
       const ang = rand(k, 1) * Math.PI * 2, r = rIn + Math.pow(rand(k, 2), 0.8) * (rOut - rIn);
       dummy.position.set(center[0] + Math.cos(ang) * r, center[1] + (rand(k, 3) - 0.5) * thick, center[2] + Math.sin(ang) * r * 0.5);
       dummy.rotation.set(rand(k, 4) * 6.3, rand(k, 5) * 6.3, rand(k, 6) * 6.3);
-      dummy.scale.setScalar(rockSize * (0.25 + Math.pow(rand(k, 7), 3) * 1.8));
+      const sc = rockSize * (0.25 + Math.pow(rand(k, 7), 3) * 1.8);
+      dummy.scale.setScalar(sc);
+      clearLane(dummy.position, 7 + sc * 2.2);
       dummy.updateMatrix(); im.setMatrixAt(i, dummy.matrix);
       col.set(rockColor).multiplyScalar(0.7 + rand(k, 8) * 0.5); im.setColorAt(i, col);
     }
@@ -1270,7 +1824,14 @@ function makeBelt({ center, rIn, rOut, thick, rocks, dust, rockColor, dustColor,
     out.set(center[0] + Math.cos(ang) * r, center[1] + (rand(i, 13) - 0.5) * thick * 1.2, center[2] + Math.sin(ang) * r * 0.5);
   }, dustColor, [0.3, 0.9], 0.12, { opacity: 0.6, maxPx: 6 });
   grp.add(pts);
-  addField(grp, vis, [mat, pts.material]);
+  // the band as seen from afar: soft dust glows strung along the ring
+  const n = 14, imp = { n, colors: [dustColor[0]], size: (rOut - rIn) * 1.1, alpha: glow || 0.16, map: spriteTexture("glow", 21, 128) };
+  const f = addField(grp, vis, [mat, pts.material], { center, dFull: rOut * 1.05, dGhost: rOut * 3, impostor: imp });
+  for (let i = 0; i < n; i++) {
+    const ang = (i / n) * Math.PI * 2, r = (rIn + rOut) / 2;
+    f.imp.off[i * 3] = center[0] + Math.cos(ang) * r; f.imp.off[i * 3 + 1] = center[1]; f.imp.off[i * 3 + 2] = center[2] + Math.sin(ang) * r * 0.5;
+  }
+  f.imp.upload();
 }
 function makePointCloud(n, placer, colors, sizeRange, hueJitter, opts) {
   const pos = new Float32Array(n * 3), col = new Float32Array(n * 3), size = new Float32Array(n);
@@ -1291,54 +1852,82 @@ function makePointCloud(n, placer, colors, sizeRange, hueJitter, opts) {
   return pts;
 }
 let nebulaTex = [];
-function makeNebula({ center, spread, flat = 0.6, points, palette, sprites, spriteAlpha, vis, dark = false }) {
+function makeNebula({ center, spread, flat = 0.6, points, palette, sprites, spriteAlpha, vis, dark = false, dFull = spread * 1.3, dGhost = spread * 3.5, seed = 4 }) {
   const grp = new THREE.Group();
   const g3 = (i, s) => (rand(i, s) + rand(i, s + 1) + rand(i, s + 2) - 1.5) / 1.5;
   const pts = makePointCloud(points, (i, out) => out.set(center[0] + g3(i, 31) * spread, center[1] + g3(i, 34) * spread * flat, center[2] + g3(i, 37) * spread),
-    palette, [0.5, 2.6], 0.08, { opacity: 0.85, maxPx: 10 });
+    palette, [0.25, 1.3], 0.08, { opacity: 0.85, maxPx: 3.5 });
   grp.add(pts);
   const mats = [pts.material];
-  const byTex = nebulaTex.map((t) => makeSpriteBatch({ count: Math.ceil(sprites / nebulaTex.length), map: t, additive: !dark, renderOrder: dark ? FX_ORDER + 1 : FX_ORDER, nearFade: [0.25, 0.8] }));
-  byTex.forEach((b, bi) => {
+  /* Emission nebulae are painted (lib/deepsky.js) in their own palette: a few
+   * large billows, each turned differently, rather than many small tinted
+   * blobs. Dark dust clouds keep the plain soft sprites, drawn darkening. */
+  const tex = dark ? null : nebulaTexture({ size: 512, seed, palette: palette.map((c) => "#" + new THREE.Color(c).getHexString()) });
+  const sets = dark ? nebulaTex.map((t) => [t, Math.ceil(sprites / nebulaTex.length)]) : [[tex, Math.max(4, Math.ceil(sprites / 3))]];
+  const white = new THREE.Color(1, 1, 1);
+  sets.forEach(([t, count], bi) => {
+    const b = makeSpriteBatch({ count, map: t, additive: !dark, renderOrder: dark ? FX_ORDER + 1 : FX_ORDER, nearFade: [0.25, 0.8] });
     for (let i = 0; i < b.count; i++) {
       const k = bi * 100 + i;
       const c = new THREE.Color(palette[k % palette.length]);
-      if (dark) c.setRGB(0.035, 0.022, 0.016);
+      if (dark) c.setRGB(0.035, 0.022, 0.016); else c.lerp(white, 0.6);
       b.set(i, center[0] + g3(k, 41) * spread * 0.8, center[1] + g3(k, 44) * spread * flat * 0.7, center[2] + g3(k, 47) * spread * 0.8,
-        spread * (0.45 + rand(k, 50) * 0.75), rand(k, 51) * 6.3, c.r, c.g, c.b, spriteAlpha * (0.6 + rand(k, 52) * 0.6));
+        spread * (dark ? 0.45 + rand(k, 50) * 0.75 : 0.9 + rand(k, 50) * 0.8), rand(k, 51) * 6.3, c.r, c.g, c.b, spriteAlpha * (dark ? 0.6 + rand(k, 52) * 0.6 : 0.9 + rand(k, 52) * 0.5));
     }
     b.upload(); grp.add(b.mesh); mats.push(b.mesh.material);
   });
-  addField(grp, vis, mats);
+  const impostor = dark ? null : { n: 3, colors: [0xffffff], size: spread * 2.6, spread: spread * 0.45, alpha: Math.min(0.7, spriteAlpha * 1.8), map: tex };
+  return addField(grp, vis, mats, { center, dFull, dGhost, impostor });
 }
-function makeGalaxy() {
-  const grp = new THREE.Group();
-  grp.position.set(-950, 560, -3950); grp.rotation.set(-1.05, 0.2, 0.42);
-  const n = 16000, arms = 4, core = new THREE.Color(0xfff0d0), edge = new THREE.Color(0x5577ff), pink = new THREE.Color(0xff6aa8);
-  const pos = new Float32Array(n * 3), col = new Float32Array(n * 3), size = new Float32Array(n), c = new THREE.Color();
-  for (let i = 0; i < n; i++) {
-    const t = i / n, radius = Math.pow(t, 0.55) * 620, arm = i % arms;
-    const angle = radius * 0.0105 + (arm / arms) * Math.PI * 2 + (rand(i, 61) - 0.5) * 0.5;
-    const sc = (1 - t) * 26 + 10;
-    pos[i * 3] = Math.cos(angle) * radius + (rand(i, 62) - 0.5) * sc * 2;
-    pos[i * 3 + 1] = (rand(i, 63) - 0.5) * sc * (1 - t) * 1.4;
-    pos[i * 3 + 2] = Math.sin(angle) * radius + (rand(i, 64) - 0.5) * sc * 2;
-    c.copy(core).lerp(edge, Math.min(1, t * 1.25));
-    if (rand(i, 65) < 0.06) c.copy(pink);
-    col.set([c.r, c.g, c.b], i * 3);
-    size[i] = 2.2 + Math.pow(rand(i, 66), 3) * 7;
+/* Other galaxies, painted (lib/deepsky.js) and hung at infinity like the star
+ * map: they ride with the camera, so they keep their place in the sky however
+ * far the ship goes - which is what something millions of light-years off
+ * does. A face-on painting on a tilted quad gives each its inclination. */
+const deepSky = [];
+function makeDeepSky() {
+  const R = 4800;
+  const items = [
+    { tex: spiralGalaxyTexture({ size: 1024, seed: 7, arms: 2, palette: "milky" }), dir: [-0.46, 0.34, -0.82], deg: 26, roll: 0.5, incl: 0.95 },
+    { tex: edgeOnGalaxyTexture({ size: 1024, seed: 2 }), dir: [0.64, 0.1, -0.76], deg: 14, roll: -0.32, incl: 0 },
+    { tex: ellipticalGalaxyTexture({ size: 512, seed: 3 }), dir: [-0.12, -0.36, -0.92], deg: 5, roll: 0.9, incl: 0 },
+    { tex: spiralGalaxyTexture({ size: 512, seed: 11, arms: 3, palette: "cool" }), dir: [0.34, 0.56, -0.75], deg: 8, roll: 1.2, incl: 0.55 },
+    { tex: spiralGalaxyTexture({ size: 512, seed: 5, arms: 4, palette: "milky" }), dir: [0.84, -0.22, 0.48], deg: 10, roll: 0.3, incl: 1.05 },
+    { tex: spiralGalaxyTexture({ size: 512, seed: 19, arms: 2, palette: "cool" }), dir: [-0.8, -0.1, 0.55], deg: 7, roll: 2.1, incl: 0.7 },
+  ];
+  for (const it of items) {
+    const m = new THREE.MeshBasicMaterial({ map: it.tex, blending: THREE.AdditiveBlending, depthTest: false, depthWrite: false, opacity: 0, fog: false });
+    const q = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), m);
+    const d = new THREE.Vector3(...it.dir).normalize();
+    q.position.copy(d).multiplyScalar(R);
+    q.lookAt(0, 0, 0); q.rotateZ(it.roll); q.rotateX(it.incl);
+    q.scale.setScalar(2 * R * Math.tan(THREE.MathUtils.degToRad(it.deg) / 2));
+    q.renderOrder = -9.7; q.frustumCulled = false;
+    starSphere.add(q);
+    deepSky.push(q);
   }
-  const g = new THREE.BufferGeometry();
-  g.setAttribute("position", new THREE.BufferAttribute(pos, 3));
-  g.setAttribute("color", new THREE.BufferAttribute(col, 3));
-  g.setAttribute("aSize", new THREE.BufferAttribute(size, 1));
-  const pts = new THREE.Points(g, softPointsMaterial({ opacity: 0.9, maxPx: 7 }));
-  pts.frustumCulled = false; pts.renderOrder = FX_ORDER;
-  grp.add(pts);
-  const glow = makeSpriteBatch({ count: 1, map: spriteTexture("glow", 5, 128), additive: true, renderOrder: FX_ORDER });
-  glow.set(0, 0, 0, 0, 380, 0, 1.0, 0.86, 0.66, 0.55); glow.upload();
-  grp.add(glow.mesh);
-  addField(grp, [0.6, 1.01], [pts.material, glow.mesh.material]);
+}
+/* Waymarks of the outer route, from the route audit: the heliopause (where the
+ * solar wind meets interstellar gas, ~120 AU) with Voyager 1 and 2 just past
+ * it; then nearby stars on the way toward Cygnus - 61 Cygni (a K-dwarf
+ * binary, 11 ly), Vega (25 ly), Albireo (a gold and blue double, ~430 ly) -
+ * and, far beyond Kepler-452, the Cygnus star fields with Deneb. */
+function makeLandmarks() {
+  const glow = spriteTexture("glow", 41, 128), glint = spriteTexture("glint", 43, 128);
+  const group = (vis, center, dFull, dGhost, items, map = glint) => {
+    const b = makeSpriteBatch({ count: items.length, map, additive: true, renderOrder: FX_ORDER, nearFade: [0.15, 0.5] });
+    items.forEach(([x, y, z, s, hex, al], i) => { const c = new THREE.Color(hex); b.set(i, x, y, z, s, rand(i, 77) * 6.3, c.r, c.g, c.b, al); });
+    b.upload();
+    addField(b.mesh, vis, [b.mesh.material], { center, dFull, dGhost });
+  };
+  // heliopause: a faint blue sheet across the route
+  const hp = [];
+  for (let i = 0; i < 9; i++) { const a = (i / 9) * Math.PI * 2; hp.push([Math.cos(a) * 150, 5 + Math.sin(a) * 110, -1520 + (rand(i, 7) - 0.5) * 30, 300, 0x7fb0ff, 0.1]); }
+  group([0.57, 0.66], [0, 5, -1520], 120, 520, hp, glow);
+  group([0.57, 0.66], [0, 0, -1570], 80, 400, [[-42, 14, -1585, 3, 0xfff0d0, 0.9], [36, -22, -1555, 3, 0xfff0d0, 0.9]]);
+  group([0.64, 0.73], [10, 25, -1930], 120, 500, [[-60, 10, -1900, 9, 0xffb070, 1], [-57.5, 9, -1900, 7, 0xff9a60, 0.9], [80, 40, -1965, 14, 0xcfe0ff, 1]]);
+  group([0.73, 0.83], [-70, 15, -2450], 120, 520, [[-70, 15, -2450, 11, 0xffc860, 1], [-66, 17.5, -2450, 8, 0x7fa8ff, 1]]);
+  group([0.86, 1.01], [340, 90, -4200], 400, 2600, [[420, 120, -4300, 60, 0xd8e8ff, 1]], glow);
+  makeNebula({ seed: 17, center: [260, 60, -4150], spread: 300, points: 1500, palette: [0xff4f9d, 0xff7ab8, 0x8fa8ff], sprites: 10, spriteAlpha: 0.22, vis: [0.86, 1.01], dFull: 400, dGhost: 2600 });
 }
 /* A deep local starfield around the whole route, for parallax: the star map is
  * at infinity, so without near stars the voyage has no sense of motion. */
@@ -1347,78 +1936,114 @@ function makeLocalStars() {
   localStars = makePointCloud(9000, (i, out) => {
     const z = 300 - rand(i, 71) * 4200, a = rand(i, 72) * Math.PI * 2, r = 120 + Math.pow(rand(i, 73), 0.6) * 1500;
     out.set(Math.cos(a) * r, Math.sin(a) * r * 0.75, z);
-  }, [0xffffff, 0xcfe0ff, 0xffe7c4, 0xaecbff, 0xffd2a8], [1.2, 6.0], 0.05, { opacity: 0, maxPx: 5 });
+  }, [0xffffff, 0xcfe0ff, 0xffe7c4, 0xaecbff, 0xffd2a8], [1.0, 4.5], 0.05, { opacity: 0, maxPx: 3.5 });
   scene.add(localStars);
 }
 
-/* --- Launch effects: cloud puffs, pad steam, exhaust trail ----------------- */
-let puffs = null, smoke = null, trail = null, engineGlow = null;
-const PUFF_N = 70, SMOKE_N = 96, TRAIL_N = 120;
+/* --- Launch effects: exhaust ground cloud, exhaust column ------------------ */
+let smoke = null, trail = null, engineGlow = null;
+const SMOKE_N = 230, TRAIL_N = 230;
+/* The exhaust is a particle system driven by mission time (from the scroll, so
+ * it plays backward as well), with each particle's launch state fixed when it
+ * is created: where the nozzles were and which way they pointed at the moment
+ * it left them. GROUND: the exhaust shoots down at speed, slowed by drag; if it
+ * reaches the ground it is turned along the flame trench (north and south) -
+ * fanning out over the pad once the vehicle is higher - and keeps billowing
+ * outward and up as a cloud of steam and smoke. COLUMN: from the nozzles along
+ * the real flight path, so it trails exactly behind the plumes; it carries a
+ * little of the exhaust's momentum, then widens and drifts on the wind. */
+const EXH = { v0: 40, k: 1.6, wind: new THREE.Vector3(0.05, 0.004, 0.03) };
+const exG = [], exC = [];
 function makeLaunchFx() {
-  puffs = makeSpriteBatch({ count: PUFF_N, map: spriteTexture("puff", 2, 512), lit: false, renderOrder: 1, nearFade: [0.35, 1.1] });
   smoke = makeSpriteBatch({ count: SMOKE_N, map: spriteTexture("smoke", 9), lit: true, renderOrder: 1, nearFade: [0.3, 0.9] });
   trail = makeSpriteBatch({ count: TRAIL_N, map: spriteTexture("smoke", 13), lit: true, renderOrder: 1, nearFade: [0.4, 1.2] });
   engineGlow = makeSpriteBatch({ count: 5, map: spriteTexture("glow", 7, 128), additive: true, renderOrder: FX_ORDER + 1 });
-  for (const b of [puffs, smoke, trail, engineGlow]) scene.add(b.mesh);
-}
-const _sp = new THREE.Vector3();
-function updateLaunchFx(p) {
-  // Fair-weather cumulus at the cloud deck's current altitude: as the planet
-  // shrinks the deck sinks relative to the pad, and the ship climbs up through it.
-  const deckY = Y_G + CLOUD_H * earthR;
-  // Billboards only read as cumulus from below and beside; once the camera is
-  // above the deck they turn into cut-outs standing on the horizon, and the
-  // cloud shell (with its own world-space structure) carries the view down.
-  // Distant ones go before the camera reaches their height (at eye level they
-  // line up along the horizon like a row of cut-outs); the few around the
-  // climb column stay long enough to fly through.
-  const puffOn = 1 - smooth(seg(earthR, 3200, 2200));
-  const camRel = camera.position.y - deckY;
-  const farOn = 1 - smooth(seg(camRel, -16, -2)), nearOn = 1 - smooth(seg(camRel, 4, 22));
-  puffs.mesh.visible = puffOn * Math.max(farOn, nearOn) > 0.01;
-  if (puffs.mesh.visible) {
-    for (let i = 0; i < PUFF_N; i++) {
-      const on = puffOn * (i < 8 ? nearOn : farOn);
-      // a few near the climb column, the rest spread out to the horizon
-      const a = rand(i, 81) * Math.PI * 2, r = i < 8 ? 6 + rand(i, 82) * 30 : 60 + Math.pow(rand(i, 82), 0.7) * 900;
-      const s = 34 + rand(i, 83) * 60;
-      const tone = 1.08 + rand(i, 85) * 0.1;
-      puffs.set(i, Math.cos(a) * r, deckY + (rand(i, 84) - 0.5) * 8 + s * 0.1, Math.sin(a) * r, s, 0, tone, tone, tone * 1.01, 0.97 * on);
-    }
-    puffs.upload();
+  for (const b of [smoke, trail, engineGlow]) scene.add(b.mesh);
+  const tailOff = tailY - ANCHORS[0].y;              // the nozzles, relative to the vehicle origin (negative: below it)
+  const t = new THREE.Vector3(), side = new THREE.Vector3(), up2 = new THREE.Vector3();
+  const launchState = (pe, k, jit) => {
+    const E = path.getPoint(shipP(pe), new THREE.Vector3());
+    safeTangent(Math.max(shipP(pe), 1e-4), t);
+    E.addScaledVector(t, tailOff);
+    // spread across the cluster of nozzles (the boosters sit either side of the tank)
+    rightOf(t, side); up2.crossVectors(side, t).normalize();
+    E.addScaledVector(side, (rand(k, 1) - 0.5) * 2 * jit).addScaledVector(up2, (rand(k, 2) - 0.5) * jit);
+    return { pe, E, D: t.clone().negate(), tE: missionTime(pe) };
+  };
+  for (let i = 0; i < SMOKE_N; i++) {
+    const pe = 0.0028 + 0.034 * Math.pow(i / SMOKE_N, 1.7);
+    const s = launchState(pe, i + 500, 1.0);
+    s.side = i % 2 ? 1 : -1; s.ang = rand(i, 93) * Math.PI * 2; s.r1 = rand(i, 94); s.r2 = rand(i, 95); s.rot = rand(i, 96) * 6.3;
+    exG.push(s);
   }
-  // Pad steam: the sound-suppression deluge flashing to steam and billowing out
-  // of both ends of the flame trench, scroll-driven so it plays in reverse too.
-  const smokeOn = seg(p, 0.004, 0.012) * (1 - seg(p, 0.07, 0.1));
-  smoke.mesh.visible = smokeOn > 0.01;
+  for (let i = 0; i < TRAIL_N; i++) {
+    const pe = LIFTOFF + 0.001 + (P.boostA + 0.002 - LIFTOFF - 0.001) * Math.pow(i / (TRAIL_N - 1), 1.15);
+    const s = launchState(pe, i + 900, 0.7);
+    s.r1 = rand(i, 101); s.r2 = rand(i, 102); s.rot = rand(i, 103) * 6.3;
+    exC.push(s);
+  }
+}
+const _sp = new THREE.Vector3(), _hd = new THREE.Vector3();
+function updateLaunchFx(p) {
+  // the exhaust: ground cloud
+  const tNow = missionTime(p);
+  const ground = Y_G + 0.45;
+  const nozzleH = vehicle.position.y + (tailY - ANCHORS[0].y) - ground;   // how high the engines are now: the glow they cast on the cloud
+  const flameK = p < P.boostA ? Math.exp(-Math.max(0, nozzleH) / 14) * smooth(seg(p, 0.0027, 0.006)) : 0;
+  const groundFade = 1 - seg(p, 0.085, 0.11);
+  smoke.mesh.visible = p > 0.0028 && groundFade > 0.01;
   if (smoke.mesh.visible) {
     for (let i = 0; i < SMOKE_N; i++) {
-      const born = 0.006 + rand(i, 91) * 0.03;
-      const age = Math.max(0, (p - born) / 0.03) + 0.04 * Math.sin(elapsed * 0.4 + i);
-      const side = i % 2 ? 1 : -1;
-      const spread = (rand(i, 92) - 0.5) * 1.4;
-      const d = 11 + Math.pow(age, 0.6) * 22 * (0.6 + rand(i, 93) * 0.6);
-      const x = spread * d * 0.45, z = side * d, y = Y_G + 0.6 + Math.pow(age, 0.8) * (2 + rand(i, 94) * 6);
-      const s = 2.5 + Math.pow(age, 0.7) * (7 + rand(i, 95) * 7);
-      const a = p > born ? smokeOn * 0.9 * (1 - smooth(seg(age, 2.5, 5))) : 0;
-      const warm = Math.exp(-age * 3) * 0.3;
-      smoke.set(i, x, y, z, s, rand(i, 96) * 6.3, 0.8 + warm, 0.79 + warm * 0.4, 0.78, a);
+      const g = exG[i];
+      if (p <= g.pe) { smoke.set(i, 0, 0, 0, 0, 0, 0, 0, 0, 0); continue; }
+      const te = tNow - g.tE;
+      const s = (EXH.v0 / EXH.k) * (1 - Math.exp(-EXH.k * te));       // distance travelled, with drag
+      const h = g.E.y - ground;
+      let x, y, z, size, al;
+      if (h * EXH.k < EXH.v0 * 0.98 && s >= h) {
+        // reached the ground: along the trench, or fanned over the pad when high
+        const ts = -Math.log(1 - (h * EXH.k) / EXH.v0) / EXH.k, tg = Math.max(0, te - ts);
+        const fan = smooth(seg(h, 5, 14));
+        _hd.set((g.r1 - 0.5) * 0.7, 0, g.side).normalize();
+        _hd.lerp(_sp.set(Math.cos(g.ang), 0, Math.sin(g.ang)), fan).normalize();
+        // shot out of the trench mouth, braked hard by the air, then a slow billowing spread
+        const r = (12 + 7 * g.r2) * (1 - Math.exp(-tg / 1.6)) + 1.3 * Math.sqrt(tg) * (0.6 + g.r1 * 0.8);
+        size = Math.min(16, 1.8 + 1.2 * Math.sqrt(tg + 0.3) * (0.7 + g.r2 * 0.7) + r * 0.06);
+        x = g.E.x + g.D.x * h + _hd.x * r; z = g.E.z + g.D.z * h + _hd.z * r;
+        y = ground + size * 0.3 + 1.1 * Math.pow(tg, 0.6) * (0.3 + g.r1 * 0.9);   // sitting on the ground, rising as it cools
+        al = 0.85 * smooth(seg(tg, 0.0, 0.5)) * (1 - smooth(seg(te, 80, 150)));
+      } else {
+        // never reached the ground: it hangs where the jet ran out and spreads
+        x = g.E.x + g.D.x * s; y = g.E.y + g.D.y * s + 0.04 * te; z = g.E.z + g.D.z * s;
+        size = Math.min(12, 1.2 + 1.1 * Math.sqrt(te));
+        al = 0.6 * smooth(seg(te, 0.2, 1.0)) * (1 - smooth(seg(te, 80, 150)));
+      }
+      x += EXH.wind.x * te + Math.sin(elapsed * 0.21 + i * 1.7) * size * 0.04;
+      z += EXH.wind.z * te + Math.cos(elapsed * 0.19 + i * 1.3) * size * 0.04;
+      y += Math.sin(elapsed * 0.17 + i) * size * 0.02;
+      // fresh exhaust is lit orange from below by the engines
+      const dx = x - vehicle.position.x, dz = z - vehicle.position.z;
+      const warm = flameK * Math.exp(-(dx * dx + dz * dz) / 260) * 0.75 + Math.exp(-te * 2.5) * 0.3;
+      smoke.set(i, x, y, z, size, g.rot + elapsed * 0.015 * (i % 2 ? 1 : -1), 0.84 + warm * 0.5, 0.83 + warm * 0.12, 0.81 - warm * 0.2, al * groundFade);
     }
     smoke.upload();
   }
-  // Exhaust trail: left behind along the path while the solids burn, then it
-  // widens and thins out.
+  // the exhaust: column along the climb, from the solids until they separate
   const trailOn = 1 - seg(p, 0.16, 0.24);
-  trail.mesh.visible = trailOn > 0.01 && p > 0.014;
+  trail.mesh.visible = trailOn > 0.01 && p > LIFTOFF;
   if (trail.mesh.visible) {
     for (let i = 0; i < TRAIL_N; i++) {
-      const pi = 0.014 + (i / TRAIL_N) * (P.boostA + 0.012 - 0.014);
-      if (pi > p - 0.0015) { trail.set(i, 0, 0, 0, 0, 0, 0, 0, 0, 0); continue; }
-      path.getPoint(pi, _sp);
-      const age = (p - pi) / 0.02;
-      const s = 1.6 + Math.pow(age, 0.6) * 3.2;
-      trail.set(i, _sp.x + (rand(i, 101) - 0.5) * s * 0.3, _sp.y - 6.5, _sp.z + (rand(i, 102) - 0.5) * s * 0.3, s, rand(i, 103) * 6.3,
-        0.74, 0.73, 0.72, 0.55 * trailOn * smooth(seg(age, 0.15, 0.6)) * (1 - smooth(seg(age, 4, 9))) * (0.7 + 0.3 * rand(i, 104)));
+      const c = exC[i];
+      if (p <= c.pe + 0.0004) { trail.set(i, 0, 0, 0, 0, 0, 0, 0, 0, 0); continue; }
+      const te = tNow - c.tE;
+      const s = 3.5 + 7 * (1 - Math.exp(-1.2 * te));                    // past the flame, still moving with the jet
+      const size = Math.min(12, 1.7 + 1.25 * Math.sqrt(te) * (0.8 + c.r1 * 0.4));
+      const x = c.E.x + c.D.x * s + EXH.wind.x * te + (c.r1 - 0.5) * size * 0.25;
+      const y = c.E.y + c.D.y * s + EXH.wind.y * te;
+      const z = c.E.z + c.D.z * s + EXH.wind.z * te + (c.r2 - 0.5) * size * 0.25;
+      const fresh = Math.exp(-te * 1.6);
+      const al = 0.62 * smooth(seg(te, 0.15, 0.9)) * (1 - smooth(seg(te, 90, 200))) * trailOn * (0.75 + 0.25 * c.r2);
+      trail.set(i, x, y, z, size, c.rot, 0.8 + fresh * 0.4, 0.79 + fresh * 0.15, 0.78 - fresh * 0.1, al);
     }
     trail.upload();
   }
@@ -1456,6 +2081,7 @@ const TARGET = 5;
 const vehicle = new THREE.Group();
 scene.add(vehicle);
 let stackRoot = null, orbiterRoot = null, tailY = 1.5;
+const ORB_MID = new THREE.Vector3();   // the orbiter's centre in vehicle space (the stack's is the origin)
 const P = { boostA: 0.105, boostB: 0.155, tankA: 0.165, tankB: 0.225 };
 const plumes = [];
 const debris = [];   // { obj, booster, kick:Vector3 (vehicle-local), c:Vector3 (centre, vehicle-local), axis, spin }
@@ -1466,12 +2092,12 @@ const debris = [];   // { obj, booster, kick:Vector3 (vehicle-local), c:Vector3 
  * frame; additive blending gains nothing from the ordering. */
 function makePlume(rad, len) {
   const g = new THREE.Group();
-  const flame = (color, opacity) => new THREE.MeshBasicMaterial({ color, transparent: true, opacity, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, forceSinglePass: true });
+  const flame = (color, opacity) => new THREE.MeshBasicMaterial({ color, transparent: true, opacity, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, forceSinglePass: true, fog: false });
   const core = new THREE.Mesh(new THREE.ConeGeometry(rad * 0.55, len * 0.62, 20, 1, true), flame(0xcfe8ff, 0.9));
   const outer = new THREE.Mesh(new THREE.ConeGeometry(rad, len, 20, 1, true), flame(0xff8a3c, 0.42));
   core.rotation.x = -Math.PI / 2; core.position.z = -len * 0.31;
   outer.rotation.x = -Math.PI / 2; outer.position.z = -len / 2;
-  const bead = new THREE.Mesh(new THREE.SphereGeometry(rad * 0.62, 12, 10), new THREE.MeshBasicMaterial({ color: 0xfff3d6, transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false }));
+  const bead = new THREE.Mesh(new THREE.SphereGeometry(rad * 0.62, 12, 10), new THREE.MeshBasicMaterial({ color: 0xfff3d6, transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false, fog: false }));
   g.add(outer); g.add(core); g.add(bead);
   for (const m of g.children) m.renderOrder = FX_ORDER;
   return g;
@@ -1567,6 +2193,7 @@ function setupVehicle(stack, orbiter) {
   // ~0.01) and takes over when the tank goes.
   normalize(orbiter, oSize.z, { x: 0, y: Math.PI / 2, z: 0 });
   orbiter.position.add(oMid);
+  ORB_MID.copy(oMid);
   orbiter.visible = false;
   orbiterRoot = orbiter; vehicle.add(orbiterRoot);
 }
@@ -1609,6 +2236,8 @@ let kepler = null, base = null;
 function buildKeplerFrame() {
   KF.E = path.getPoint(FINALE_START, new THREE.Vector3());
   KF.t0 = safeTangent(FINALE_START, new THREE.Vector3()).clone();
+  // the cruise's speed at the hand-over (units per unit of p): the orbit eases up from it
+  KF.v0 = path.getPoint(FINALE_START + 0.001, new THREE.Vector3()).distanceTo(path.getPoint(FINALE_START - 0.001, new THREE.Vector3())) / 0.002;
   const right = rightOf(KF.t0, new THREE.Vector3());
   KF.n = new THREE.Vector3(0, -0.85, 0).addScaledVector(right, 0.55);
   KF.n.addScaledVector(KF.t0, -KF.n.dot(KF.t0)).normalize();         // orbit centre: below-right of the path
@@ -1654,7 +2283,124 @@ function makeKepler() {
     const l = new THREE.Mesh(new THREE.SphereGeometry(0.09, 8, 6), lightMat);
     l.position.set(Math.cos(a) * 4.35, 0.06, Math.sin(a) * 4.35); base.add(l);
   }
+  makeBaseProps();
   scene.add(base);
+}
+/* Everything else on the Base One pad, built from primitives: landing-pad
+ * floodlights and approach lamps, a radio mast with a blinking beacon, fuel
+ * tanks and their manifold, a field of solar panels, supply crates, boulders
+ * round the edge, and a line of ridges on the horizon. In the base frame: x
+ * along the approach, z to the side, y up; 1 unit ~ 11 m. */
+let beacon = null, baseDust = null;
+function makeBaseProps() {
+  const g = new THREE.Group();
+  const white = new THREE.MeshStandardMaterial({ color: 0xdfe0dc, roughness: 0.5, metalness: 0.3 });
+  const steel = new THREE.MeshStandardMaterial({ color: 0x7b828a, roughness: 0.55, metalness: 0.65 });
+  const dark = new THREE.MeshStandardMaterial({ color: 0x23272d, roughness: 0.7, metalness: 0.4 });
+  const glowY = new THREE.MeshBasicMaterial({ color: 0xffd27a, fog: false }), glowR = new THREE.MeshBasicMaterial({ color: 0xff4a3a, fog: false });
+  // lamp posts along the track, with a warm lamp head
+  for (let i = 0; i < 9; i++) {
+    const x = 7 + i * 2.6, z = 0.35 * x + (i % 2 ? 1.4 : -1.4);
+    const post = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.05, 1.5, 6), steel); post.position.set(x, 0.75, z); g.add(post);
+    const head = new THREE.Mesh(new THREE.SphereGeometry(0.1, 8, 6), glowY); head.position.set(x, 1.52, z); g.add(head);
+  }
+  // radio mast with guy wires and a blinking beacon
+  const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.09, 8, 6), steel); mast.position.set(2, 4, -16); g.add(mast);
+  for (let k = 0; k < 3; k++) {
+    const a0 = (k / 3) * Math.PI * 2, wire = new THREE.Mesh(new THREE.CylinderGeometry(0.008, 0.008, 6.4, 3), steel);
+    wire.position.set(2 + Math.cos(a0) * 2.4, 3.6, -16 + Math.sin(a0) * 2.4); wire.lookAt(2, 7.4, -16); wire.rotateX(Math.PI / 2); g.add(wire);
+  }
+  for (let k = 0; k < 3; k++) { const dish = new THREE.Mesh(new THREE.SphereGeometry(0.4, 12, 8, 0, Math.PI), white); dish.position.set(2.1, 5.5 + k * 0.9, -16); dish.rotation.y = k * 1.2 + 0.4; g.add(dish); }
+  beacon = new THREE.Mesh(new THREE.SphereGeometry(0.16, 8, 6), glowR); beacon.position.set(2, 8.1, -16); g.add(beacon);
+  // fuel tanks: a row of white spheres on legs, joined by a pipe
+  for (let k = 0; k < 3; k++) {
+    const x = 14 + k * 3.1, z = 12.5;
+    const t = new THREE.Mesh(new THREE.SphereGeometry(1.2, 24, 16), white); t.position.set(x, 1.8, z); g.add(t);
+    for (let l = 0; l < 4; l++) { const aa = l * Math.PI / 2 + Math.PI / 4, leg = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.08, 1.2, 6), steel); leg.position.set(x + Math.cos(aa) * 0.8, 0.6, z + Math.sin(aa) * 0.8); g.add(leg); }
+  }
+  const pipe = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 9.5, 8), steel); pipe.rotation.z = Math.PI / 2; pipe.position.set(17.1, 0.3, 10.5); g.add(pipe);
+  // a field of solar panels on stands, tilted toward the star
+  const panelTex = (() => {
+    const c = document.createElement("canvas"); c.width = 128; c.height = 128; const x = c.getContext("2d");
+    x.fillStyle = "#14213b"; x.fillRect(0, 0, 128, 128);
+    x.strokeStyle = "#5b79b4"; x.lineWidth = 2;
+    for (let i = 0; i <= 128; i += 32) { x.beginPath(); x.moveTo(i, 0); x.lineTo(i, 128); x.stroke(); x.beginPath(); x.moveTo(0, i); x.lineTo(128, i); x.stroke(); }
+    const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 8; return t;
+  })();
+  const pm = new THREE.MeshStandardMaterial({ map: panelTex, roughness: 0.3, metalness: 0.6 });
+  for (let r = 0; r < 3; r++) for (let k = 0; k < 6; k++) {
+    const x = -9 + k * 2.3, z = -24 - r * 3.4;
+    const p = new THREE.Mesh(new THREE.BoxGeometry(2, 0.06, 1.5), pm); p.position.set(x, 1.05, z); p.rotation.x = -0.55; g.add(p);
+    const s = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 1.0, 5), steel); s.position.set(x, 0.5, z); g.add(s);
+  }
+  // crates and drums beside the habitat
+  const crateMat = new THREE.MeshStandardMaterial({ color: 0x8a6d3b, roughness: 0.85 }), drumMat = new THREE.MeshStandardMaterial({ color: 0x2f6f8f, roughness: 0.5, metalness: 0.3 });
+  for (let k = 0; k < 7; k++) {
+    const c = new THREE.Mesh(new THREE.BoxGeometry(0.7 + 0.3 * rand(k, 5), 0.6 + 0.3 * rand(k, 6), 0.7), crateMat);
+    c.position.set(9 + (k % 4) * 0.9, 0.35 + (k > 3 ? 0.65 : 0), 5.2 + Math.floor(k / 4) * 0.2); c.rotation.y = rand(k, 7) * 0.5; g.add(c);
+  }
+  for (let k = 0; k < 5; k++) { const d = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.22, 0.6, 12), drumMat); d.position.set(11.5 + k * 0.5, 0.3, 6.2); g.add(d); }
+  // two storage silos with domed caps and a ladder, beyond the pad
+  for (const [x, z] of [[19, -12], [21.6, -13.2]]) {
+    const s = new THREE.Mesh(new THREE.CylinderGeometry(0.95, 1.0, 2.3, 24), white); s.position.set(x, 1.15, z); g.add(s);
+    const cap = new THREE.Mesh(new THREE.SphereGeometry(0.95, 24, 8, 0, Math.PI * 2, 0, Math.PI / 2), steel); cap.position.set(x, 2.3, z); g.add(cap);
+    const band = new THREE.Mesh(new THREE.CylinderGeometry(1.02, 1.02, 0.12, 24), dark); band.position.set(x, 1.0, z); g.add(band);
+    const lad = new THREE.Mesh(new THREE.BoxGeometry(0.06, 2.2, 0.1), steel); lad.position.set(x + 0.98, 1.1, z); g.add(lad);
+  }
+  // boulders in a loose ring round the apron (instanced, from the asteroid rock shape)
+  const rg = rockGeometry(5.3), rm = new THREE.MeshStandardMaterial({ color: 0x7a6552, vertexColors: true, roughness: 0.95 });
+  const rocks = new THREE.InstancedMesh(rg, rm, 60), dm = new THREE.Object3D();
+  for (let k = 0; k < 60; k++) {
+    const aa = rand(k, 1) * Math.PI * 2, rr = 10 + Math.pow(rand(k, 2), 0.7) * 26, sc = 0.12 + Math.pow(rand(k, 3), 3) * 1.1;
+    dm.position.set(Math.cos(aa) * rr, sc * 0.35, Math.sin(aa) * rr); dm.rotation.set(rand(k, 4) * 6, rand(k, 5) * 6, rand(k, 6) * 6); dm.scale.set(sc, sc * 0.7, sc); dm.updateMatrix(); rocks.setMatrixAt(k, dm.matrix);
+  }
+  g.add(rocks);
+  // ridges: two rings of eroded mesas and spurs on the horizon, the far one paler
+  // with distance (planet curvature hides their feet)
+  for (const [R0, hs, far, seed] of [[150, 0.95, 0, 3.1], [205, 1.35, 1, 8.7]]) {
+    const N = 240, pos = [], col = [], idx = [];
+    for (let i = 0; i <= N; i++) {
+      const t = i / N, ang = t * Math.PI * 2;
+      const hgt = (1.5 + 34 * Math.pow(Math.max(0, fbmP(t * 7 + seed, 1.7, 7, 4) - 0.28), 1.7) + (fbmP(t * 45, 4.2, 45, 3) - 0.5) * 4 + 22 * Math.pow(Math.max(0, fbmP(t * 3 + seed + 4, 0.5, 3, 3) - 0.5), 1.3)) * hs;
+      const mesa = Math.floor(hgt / 2.6) * 2.6 * 0.55 + hgt * 0.45;       // terraced, like eroded strata
+      const R = R0 + 30 * fbmP(t * 6, 9.1, 6, 3);
+      for (const [y, f] of [[-8, 0], [mesa, 1]]) {
+        pos.push(Math.cos(ang) * R, y, Math.sin(ang) * R);
+        const haze = far ? 0.5 : 0.22, lo = f ? [0.2, 0.12, 0.09] : [0.4, 0.3, 0.25], hz = [0.62, 0.52, 0.46];
+        col.push(...lo.map((v, k) => lerp(v, hz[k], haze + (f ? 0 : 0.2))));
+      }
+      if (i < N) { const b = i * 2; idx.push(b, b + 1, b + 2, b + 1, b + 3, b + 2); }
+    }
+    const rgm = new THREE.BufferGeometry();
+    rgm.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3)); rgm.setAttribute("color", new THREE.Float32BufferAttribute(col, 3));
+    rgm.setIndex(idx); rgm.computeVertexNormals();
+    g.add(new THREE.Mesh(rgm, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide, fog: false })));
+  }
+  g.traverse((o) => { if (o.isMesh) o.matrixAutoUpdate = true; });
+  rememberOpacity(g);
+  base.add(g);
+  // landing dust: blown outward from the pad as the engines come in low
+  baseDust = makeSpriteBatch({ count: 90, map: spriteTexture("smoke", 17), lit: true, renderOrder: 1, nearFade: [0.3, 0.9] });
+  baseDust.mesh.frustumCulled = false; baseDust.mesh.visible = false; scene.add(baseDust.mesh);
+}
+const _bd = new THREE.Vector3();
+function updateBaseDust(p) {
+  if (!baseDust) return;
+  const s = seg(p, F_DESC_END, 1);
+  // engine height above the pad drives it: nothing until ~25 units up, a full ring by touchdown
+  const h = Math.max(0, vehicle.position.clone().sub(KF.B).dot(KF.nB));
+  const on = (1 - smooth(seg(h, 5, 28))) * smooth(seg(s, 0.45, 0.8));
+  baseDust.mesh.visible = on > 0.01 && p >= F_DESC_END;
+  if (!baseDust.mesh.visible) return;
+  for (let i = 0; i < baseDust.count; i++) {
+    const ang = rand(i, 311) * Math.PI * 2, ph = (rand(i, 312) + elapsed * (0.12 + 0.1 * rand(i, 313))) % 1;   // a puff's life: out and away
+    const r = 1.2 + ph * (6 + 9 * rand(i, 314)), y = 0.25 + ph * (0.7 + 1.6 * rand(i, 315)) * (1 - 0.4 * ph);
+    _bd.copy(KF.B).addScaledVector(KF.fwd, Math.cos(ang) * r).addScaledVector(KF.side, Math.sin(ang) * r).addScaledVector(KF.nB, y);
+    const sz = 0.9 + ph * 2.6 * (0.6 + rand(i, 316));
+    const al = on * 0.42 * Math.sin(Math.PI * Math.min(1, ph * 1.15)) * (0.6 + 0.4 * rand(i, 317));
+    baseDust.set(i, _bd.x, _bd.y, _bd.z, sz, rand(i, 318) * 6.3, 0.82, 0.66, 0.46, al);
+  }
+  baseDust.upload();
 }
 /* Base modules arrive in the background after the main load. Placement is in
  * the landing frame: x along the approach, z to the side, y up. */
@@ -1680,7 +2426,7 @@ const texLoader = new THREE.TextureLoader(manager);
 const draco = new DRACOLoader().setDecoderPath("https://unpkg.com/three@0.160.0/examples/jsm/libs/draco/");
 const gltfLoader = new GLTFLoader(manager).setDRACOLoader(draco);
 const lateLoader = new GLTFLoader().setDRACOLoader(draco);
-const loadTex = (url) => new Promise((res, rej) => texLoader.load(url, (t) => { t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 8; res(t); }, undefined, rej));
+const loadTex = (url) => new Promise((res, rej) => texLoader.load(url, (t) => { t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 8; t.wrapS = THREE.RepeatWrapping; res(t); }, undefined, rej));
 const loadGlb = (url, l = gltfLoader) => new Promise((res, rej) => l.load(url, res, undefined, rej));
 
 Promise.all([
@@ -1692,16 +2438,17 @@ Promise.all([
   placeGantry(gantryG.scene, tailY);
   placeCrawler(crawlerG.scene);
   makePadProps();
+  makeKSC();
   Object.assign(textures, { moon, mars, jupiter, saturn, neptune, pluto, uranus: uranusTexture() });
   makeEarth(earth);
-  BODY_DEFS.forEach(makeBody);
+  BODY_DEFS.forEach((d) => makeBody(d));
+  MINOR_DEFS.forEach((d) => makeBody(d, true));
+  glints = makeSpriteBatch({ count: 24, map: spriteTexture("glint", 5, 128), additive: true, renderOrder: FX_ORDER });
+  scene.add(glints.mesh);
   makeStar();
   buildKeplerFrame();
   makeKepler();
   bodies.star.pos.copy(KF.starPos); bodies.star.group.position.copy(KF.starPos);
-  starGlow.set(0, KF.starPos.x, KF.starPos.y, KF.starPos.z, 42 * 9, 0, 1.0, 0.82, 0.55, 0.85);
-  starGlow.set(1, KF.starPos.x, KF.starPos.y, KF.starPos.z, 42 * 3.2, 0, 1.0, 0.95, 0.85, 1.0);
-  starGlow.upload();
   FEATURES.find((f) => f.key === "star").pos = KF.starPos;
   FEATURES.find((f) => f.key === "kepler").pos.copy(KF.K);
   placeBodies();
@@ -1710,20 +2457,26 @@ Promise.all([
   const ringN = sat.ring.getWorldDirection(new THREE.Vector3());
   for (const u of [sat.mat.uniforms, sat.ring.material.uniforms]) { u.uCenter.value.copy(sat.pos); u.uRingN.value.copy(ringN); }
   nebulaTex = [spriteTexture("nebula", 3), spriteTexture("nebula", 11), spriteTexture("nebula", 23), spriteTexture("nebula", 37)];
-  makeBelt({ center: [16, 6, -360], rIn: 22, rOut: 150, thick: 34, rocks: 540, dust: 2600, rockColor: 0x8a7f72, dustColor: [0x9a8a78, 0x7d7468], vis: [0.27, 0.47], rockSize: 1.3 });
-  makeBelt({ center: [4, 8, -1410], rIn: 40, rOut: 260, thick: 60, rocks: 360, dust: 3200, rockColor: 0xb8c6d8, dustColor: [0xb8c8e0, 0x9fb4d0], vis: [0.53, 0.68], rockSize: 1.6 });
-  addField(makePointCloud(5000, (i, out) => {
-    const u = rand(i, 1) * 2 - 1, th = rand(i, 2) * Math.PI * 2, rr = 360 * (0.85 + rand(i, 3) * 0.15), s = Math.sqrt(1 - u * u);
+  /* The main belt lies beyond Mars (2.2-3.2 AU) and short of Jupiter; the
+   * Kuiper belt beyond Neptune. Windows and reveal distances per the route
+   * audit, so each is a faint patch ahead well before the ship is in it. */
+  makeBelt({ center: [16, 6, -425], rIn: 22, rOut: 150, thick: 34, rocks: 540, dust: 2600, rockColor: 0x8a7f72, dustColor: [0x9a8a78, 0x7d7468], vis: [0.19, 0.5], rockSize: 1.3 });
+  makeBelt({ center: [4, 8, -1410], rIn: 40, rOut: 260, thick: 60, rocks: 360, dust: 3200, rockColor: 0xb8c6d8, dustColor: [0xb8c8e0, 0x9fb4d0], vis: [0.48, 0.7], rockSize: 1.6, glow: 0.12 });
+  // the Oort cloud: a vast, thin shell of icy bodies, a pale haze ahead long before the ship is inside it
+  const oort = makePointCloud(6000, (i, out) => {
+    const u = rand(i, 1) * 2 - 1, th = rand(i, 2) * Math.PI * 2, rr = 360 * (0.82 + rand(i, 3) * 0.18), s = Math.sqrt(1 - u * u);
     out.set(Math.cos(th) * s * rr, 2 + u * rr, -1700 + Math.sin(th) * s * rr);
-  }, [0xd6e4f4, 0xbfd2ea], [0.8, 2.6], 0.04, { opacity: 0.9, maxPx: 6 }), [0.6, 0.72], []);
-  fields[fields.length - 1].mats = [{ m: fields[fields.length - 1].obj.material, op0: 0.9 }];
-  makeNebula({ center: [0, 0, -1980], spread: 140, points: 2600, palette: [0x5a7dff, 0x9a6bff, 0x4fc3ff], sprites: 20, spriteAlpha: 0.32, vis: [0.66, 0.79] });
-  makeNebula({ center: [0, 10, -2330], spread: 200, points: 3000, palette: [0xbfe6ff, 0x7fd6ff, 0xffffff, 0xffb6e0], sprites: 20, spriteAlpha: 0.22, vis: [0.73, 0.85] });
-  makeNebula({ center: [0, -10, -2760], spread: 230, flat: 0.3, points: 7000, palette: [0xffe2b0, 0xfff3d8, 0xffc78a, 0xffb07a], sprites: 16, spriteAlpha: 0.3, vis: [0.79, 0.9] });
-  makeNebula({ center: [0, 0, -2700], spread: 170, flat: 0.25, points: 10, palette: [0x000000], sprites: 22, spriteAlpha: 0.85, vis: [0.79, 0.9], dark: true });
-  makeNebula({ center: [-10, 0, -3050], spread: 220, points: 3400, palette: [0xff4f9d, 0xff7ac0, 0x7a5cff, 0xff9b5c], sprites: 24, spriteAlpha: 0.36, vis: [0.84, 0.97] });
-  makeNebula({ center: [60, 30, -3080], spread: 170, points: 2000, palette: [0x21d4ff, 0x4f8bff, 0x9ff0ff], sprites: 14, spriteAlpha: 0.3, vis: [0.84, 0.97] });
-  makeGalaxy();
+  }, [0xd6e4f4, 0xbfd2ea], [0.8, 2.6], 0.04, { opacity: 0.9, maxPx: 6 });
+  addField(oort, [0.5, 0.76], [oort.material], { center: [0, 2, -1700], dFull: 300, dGhost: 800,
+    impostor: { n: 4, colors: [0x9fb6d8, 0xb8c8e8], size: 520, spread: 260, alpha: 0.22, map: spriteTexture("glow", 31, 128) } });
+  makeNebula({ seed: 24, center: [0, 0, -1980], spread: 140, points: 2600, palette: [0x5a7dff, 0x9a6bff, 0x4fc3ff], sprites: 20, spriteAlpha: 0.32, vis: [0.6, 0.8], dFull: 220, dGhost: 620 });
+  makeNebula({ seed: 31, center: [0, 10, -2330], spread: 200, points: 3000, palette: [0xbfe6ff, 0x7fd6ff, 0xffffff, 0xffb6e0], sprites: 20, spriteAlpha: 0.22, vis: [0.64, 0.87], dFull: 300, dGhost: 800 });
+  makeNebula({ seed: 38, center: [0, -10, -2760], spread: 230, flat: 0.3, points: 7000, palette: [0xffe2b0, 0xfff3d8, 0xffc78a, 0xffb07a], sprites: 16, spriteAlpha: 0.3, vis: [0.72, 0.92], dFull: 260, dGhost: 700 });
+  makeNebula({ seed: 45, center: [0, 0, -2700], spread: 170, flat: 0.25, points: 10, palette: [0x000000], sprites: 22, spriteAlpha: 0.85, vis: [0.73, 0.9], dark: true, dFull: 260, dGhost: 700 });
+  makeNebula({ seed: 52, center: [-10, 0, -3050], spread: 220, points: 3400, palette: [0xff4f9d, 0xff7ac0, 0x7a5cff, 0xff9b5c], sprites: 24, spriteAlpha: 0.36, vis: [0.78, 0.98], dFull: 270, dGhost: 720 });
+  makeNebula({ seed: 59, center: [60, 30, -3080], spread: 170, points: 2000, palette: [0x21d4ff, 0x4f8bff, 0x9ff0ff], sprites: 14, spriteAlpha: 0.3, vis: [0.79, 0.98], dFull: 270, dGhost: 720 });
+  makeLandmarks();
+  makeDeepSky();
   makeLocalStars();
   makeLaunchFx();
   measureScroll();
@@ -1732,15 +2485,28 @@ Promise.all([
   warmup();
   loaderEl.classList.add("is-hidden");
   loadBase();
+  loadMoons();
 }).catch((err) => {
   console.error("Asset load failed:", err);
   if (pctEl) pctEl.parentElement.textContent = "Could not load assets - serve over http (see README).";
 });
+const lateTex = new THREE.TextureLoader();
+function loadMoons() {
+  for (const [key, file] of Object.entries(MOONURL)) {
+    lateTex.load(U(TEX + file), (t) => {
+      t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 8;
+      const b = bodies[key]; if (!b) return;
+      b.mat.uniforms.uMap.value = t; b.mat.uniforms.uHasMap.value = 1;
+    });
+  }
+}
 function loadBase() {
-  Promise.all([loadGlb(MODEL.habitat, lateLoader), loadGlb(MODEL.dish, lateLoader), loadGlb(MODEL.ship2, lateLoader)]).then(([hab, dish, ship2]) => {
+  Promise.all([loadGlb(MODEL.habitat, lateLoader), loadGlb(MODEL.dish, lateLoader), loadGlb(MODEL.ship2, lateLoader), loadGlb(MODEL.hq, lateLoader)]).then(([hab, dish, ship2, hq]) => {
     placeOnBase(hab.scene, 4.4, 6.5, 9.5, -0.6);
     placeOnBase(dish.scene, 4.2, -4.5, -12.5, 0.9, "y");
     placeOnBase(ship2.scene, 3.0, 11, -6.5, 2.4);
+    placeOnBase(hq.scene, 7.5, 24, -3, -1.9, "y");          // the control building, beyond the pad
+    for (const o of base.children) o.traverse((m) => { if (m.isMesh && m.material && m.material.color) m.material.envMapIntensity = 0.6; });
     warmupBase();
   }).catch((e) => console.warn("Base modules failed to load:", e));
 }
@@ -1789,21 +2555,19 @@ measureScroll();
 window.addEventListener("load", measureScroll);
 if (window.ResizeObserver) new ResizeObserver(measureScroll).observe(document.documentElement);
 
-/* Text: each panel's title and copy are driven from scroll position directly
- * (CSS variables), so they glide in and out with the scene instead of popping
- * when an observer fires. The copy rises in a beat after the title. */
+/* Text: each panel's title is driven from scroll position directly (CSS
+ * variables), so it glides in and out with the scene instead of popping when
+ * an observer fires. Descriptions are tooltips on the titles (styles.css). */
 function updatePanels(y) {
   const vh = Math.max(1, window.innerHeight);
   for (const m of panelMap) {
     const k = (y + vh / 2 - (m.top + m.h / 2)) / vh;          // -1 below .. 0 centred .. +1 above
     const a = Math.abs(k);
     const tv = 1 - smooth(seg(a, 0.22 + Math.max(0, (m.h / vh - 1) * 0.5), 0.58 + Math.max(0, (m.h / vh - 1) * 0.5)));
-    const dv = 1 - smooth(seg(a, 0.1 + Math.max(0, (m.h / vh - 1) * 0.5), 0.36 + Math.max(0, (m.h / vh - 1) * 0.5)));
-    const key = tv.toFixed(3) + "|" + dv.toFixed(3) + "|" + clamp(k, -1, 1).toFixed(3);
+    const key = tv.toFixed(3) + "|" + clamp(k, -1, 1).toFixed(3);
     if (key === m.last) continue;
     m.last = key;
     m.el.style.setProperty("--tv", tv.toFixed(3));
-    m.el.style.setProperty("--dv", dv.toFixed(3));
     m.el.style.setProperty("--k", clamp(k, -1, 1).toFixed(3));
   }
 }
@@ -1811,16 +2575,17 @@ function updatePanels(y) {
 /* --- HUD ------------------------------------------------------------------- */
 const hud = document.getElementById("hud-label");
 const PHASES = [
-  [0.25, "TRANS-LUNAR INJECTION"], [0.29, "LUNAR SLINGSHOT - GRAVITY ASSIST"], [0.33, "OVER MARS"],
-  [0.37, "THE ASTEROID BELT"], [0.4, "JUPITER - GRAVITY ASSIST"], [0.46, "OVER SATURN'S RINGS"],
-  [0.52, "THE ICE GIANTS - URANUS AND NEPTUNE"], [0.575, "THE KUIPER BELT"], [0.635, "THE OORT CLOUD - 1 LY"],
-  [0.695, "LOCAL INTERSTELLAR CLOUD - 30 LY"], [0.755, "THE LOCAL BUBBLE - 300 LY"], [0.815, "THE GREAT RIFT - 700 LY"],
-  [0.87, "THE ORION-CYGNUS ARM - 1,200 LY"], [0.915, "KEPLER-452 - 1,800 LY"], [0.95, "ORBITING KEPLER-452b"],
+  [0.25, "TRANS-LUNAR INJECTION"], [0.29, "LUNAR SLINGSHOT - GRAVITY ASSIST"], [0.325, "PAST MARS"],
+  [0.35, "THE ASTEROID BELT"], [0.392, "JUPITER - GRAVITY ASSIST"], [0.46, "OVER SATURN'S RINGS"],
+  [0.52, "THE ICE GIANTS - URANUS AND NEPTUNE"], [0.575, "THE KUIPER BELT"], [0.612, "THE HELIOPAUSE - VOYAGERS 1 AND 2"],
+  [0.635, "THE OORT CLOUD - TO 1.6 LY"], [0.695, "LOCAL INTERSTELLAR CLOUD - 30 LY ACROSS"], [0.755, "THE LOCAL BUBBLE - 300 LY"],
+  [0.815, "THE GREAT RIFT - 700 LY"], [0.87, "THE ORION-CYGNUS ARM"], [0.915, "KEPLER-452 - G2V - 1,800 LY"], [0.95, "ORBITING KEPLER-452b"],
   [F_ORBIT_END, "DE-ORBIT BURN - ENTRY INTERFACE"], [F_DESC_END, "DESCENT THROUGH THE ATMOSPHERE"], [0.996, "TOUCHDOWN - BASE ONE"],
 ];
 let shipAlt = 0;   // ship altitude above Earth, in atmosphere thicknesses
 function hudText(p) {
-  if (p < 0.008) return "ON THE PAD - LC-39A, KENNEDY SPACE CENTER";
+  if (p < 0.0027) return "ON THE PAD - LC-39A, KENNEDY SPACE CENTER";
+  if (p < LIFTOFF) return "MAIN ENGINE START";
   if (p < 0.024) return "IGNITION - LIFTOFF";
   if (p >= P.boostA - 0.002 && p < P.boostA + 0.03) return "BOOSTER SEPARATION";
   if (p >= P.tankA && p < P.tankA + 0.03) return "EXTERNAL TANK JETTISON";
@@ -1845,6 +2610,7 @@ const lastTan = new THREE.Vector3(0, 0, -1);
 const _shipRight = new THREE.Vector3(), _shipUp = new THREE.Vector3(), _refUp = new THREE.Vector3(), _basis = new THREE.Matrix4();
 const _launch = new THREE.Vector3(), _bias = new THREE.Vector3(), _side = new THREE.Vector3(), _q = new THREE.Quaternion();
 const ALT_UP = new THREE.Vector3(0, 0, 1);
+const _away = new THREE.Vector3(), _cd = new THREE.Vector3();
 function rightOf(t, out) { out.crossVectors(t, UP); if (out.lengthSq() < 1e-6) out.set(1, 0, 0); return out.normalize(); }
 /* Ship attitude as an explicit basis: x = right, y = up, z = nose. Near-vertical
  * flight blends the reference up toward +Z so the cross products stay well
@@ -1879,12 +2645,30 @@ function safeLookAt(target, upHint = UP) {
   camera.lookAt(target);
 }
 
+/* Keep the vehicle the centre of the frame: whatever the aim is biased toward
+ * (a planet being passed, the horizon), the view direction is pulled back to
+ * within `maxDeg` of the ship's visual centre. */
+const _vc = new THREE.Vector3(), _ad = new THREE.Vector3(), _sd = new THREE.Vector3(), _cq = new THREE.Quaternion();
+function shipCentre(out) { return out.copy(stackRoot && stackRoot.visible ? _zero3 : ORB_MID).applyMatrix4(vehicle.matrixWorld); }
+const _zero3 = new THREE.Vector3();
+function centreOnShip(look, maxDeg) {
+  shipCentre(_vc);
+  _ad.subVectors(look, camera.position); const len = _ad.length(); if (len < 1e-6) return;
+  _ad.multiplyScalar(1 / len);
+  _sd.subVectors(_vc, camera.position).normalize();
+  const ang = Math.acos(clamp(_ad.dot(_sd), -1, 1)), max = THREE.MathUtils.degToRad(maxDeg);
+  if (ang <= max) return;
+  _cq.setFromUnitVectors(_sd, _ad);
+  _cq.slerp(new THREE.Quaternion(), 1 - max / ang);          // rotate only max of the way from the ship
+  look.copy(camera.position).addScaledVector(_sd.applyQuaternion(_cq), len);
+}
+
 /* Thrust, flame and the ignition flash, shared by the cruise and the finale. */
 function engines(p, thrust) {
   const flick = 0.94 + 0.06 * Math.sin(elapsed * 21) + 0.03 * Math.sin(elapsed * 47.3);
   setPlumes(thrust, flick);
   escort.position.copy(vehicle.position).addScaledVector(tmp.set(0, 0, -1).applyQuaternion(vehicle.quaternion), 3.4);
-  escort.intensity = 2.2 + 22 * Math.exp(-Math.pow((p - 0.016) / 0.0055, 2)) + 5 * thrust;
+  escort.intensity = 2.2 + 22 * Math.exp(-Math.pow((p - LIFTOFF - 0.002) / 0.004, 2)) + 5 * thrust;
   // engine glow billboards at the nozzles
   let n = 0;
   for (const pl of plumes) {
@@ -1897,12 +2681,48 @@ function engines(p, thrust) {
   engineGlow.upload();
 }
 
+/* Bodies being passed: the camera swings round the ship to the side away
+ * from them, so the planet sits behind the ship in the frame while the ship
+ * stays centred (aiming at the planet instead pushed the ship off-centre).
+ * Never ahead of the ship: the forward part of the swing is dropped. Shared by
+ * the cruise and the finale, so the hand-over between them has no seam.
+ * Returns the total weight of the bodies in play (featPos is their centroid). */
+function swingChase(p, shipPos, tan, camPos) {
+  let totalW = 0; featPos.set(0, 0, 0);
+  for (const f of FEATURES) {
+    if (!f.pos) continue;
+    const d = Math.abs(p - f.pAt); if (d >= f.w) continue;
+    const wgt = f.strength * smooth(1 - d / f.w);
+    featPos.addScaledVector(f.pos, wgt); totalW += wgt;
+  }
+  if (totalW > 0) {
+    featPos.multiplyScalar(1 / totalW);
+    const k = Math.min(totalW, 1) * 0.8;
+    _away.subVectors(shipPos, featPos).normalize(); _away.addScaledVector(tan, -Math.max(0, _away.dot(tan)));
+    const al = _away.length();                                   // ~0 if the body is dead astern: no side to swing to
+    _cd.subVectors(camPos, shipPos); const dist = _cd.length(); _cd.multiplyScalar(1 / dist);
+    if (al > 1e-3) _cd.multiplyScalar(1 - k * smooth(clamp(al / 0.3, 0, 1))).addScaledVector(_away.multiplyScalar(1 / al), k * smooth(clamp(al / 0.3, 0, 1))).normalize();
+    const fw = _cd.dot(tan); if (fw > -0.3) _cd.addScaledVector(tan, -0.3 - fw).normalize();
+    camPos.copy(shipPos).addScaledVector(_cd, dist);
+  }
+  return totalW;
+}
+/* ...and a touch of aim toward them, within the centring limit applied later. */
+function aimBias(look, shipPos, totalW, camPos = camera.position) {
+  if (totalW <= 0) return;
+  _bias.copy(featPos).sub(look).multiplyScalar(Math.min(totalW, 1));
+  const maxBias = camPos.distanceTo(shipPos) * 0.22;
+  if (_bias.length() > maxBias) _bias.setLength(maxBias);
+  look.add(_bias);
+}
+
 function updatePath(p) {
   if (!stackRoot) return;
   if (p >= FINALE_START && kepler) { finale(p); commonUpdates(p); return; }
   vehicle.scale.setScalar(1);
-  path.getPoint(clamp(p, 0, 1), pos);
-  safeTangent(p, tangent);
+  const sp = shipP(clamp(p, 0, 1));
+  path.getPoint(sp, pos);
+  safeTangent(Math.max(sp, 1e-4), tangent);
   vehicle.position.copy(pos);
   orientShip(tangent);
   vehicle.updateMatrixWorld(true);
@@ -1912,10 +2732,10 @@ function updatePath(p) {
    * glow, and a low-passed scroll speed makes the flame swell with the scroll.
    * The solids cut out at separation; the mains throttle back once the tank
    * goes. */
-  const ignite = smooth(seg(p, 0.0015, 0.018));
+  const ignite = smooth(seg(p, 0.0027, 0.009));      // main engines at T-6.6 s, full thrust with the solids at T-0
   const climb = 1 - smooth(seg(p, 0.075, 0.3));
   const thrust = ignite * lerp(0.3, 1.25, climb) * (1 + 0.22 * Math.min(scrollVel * 9, 1));
-  for (const q of plumes) q.live = q.kind === "srb" ? 1 - seg(p, P.boostA, P.boostA + 0.012) : lerp(1, 0.3, seg(p, P.tankA, P.tankB));
+  for (const q of plumes) q.live = q.kind === "srb" ? seg(p, LIFTOFF - 0.0006, LIFTOFF + 0.0004) * (1 - seg(p, P.boostA, P.boostA + 0.012)) : lerp(1, 0.3, seg(p, P.tankA, P.tankB));
   engines(p, thrust);
   const swapped = p >= P.tankB;
   stackRoot.visible = !swapped;
@@ -1928,34 +2748,21 @@ function updatePath(p) {
    * At toChase == 1 the lerp is exactly the chase position: no snap. */
   const toChase = smooth(seg(p, 0.13, 0.26));
   rightOf(tangent, right);
-  chasePos.copy(pos).addScaledVector(tangent, -27).addScaledVector(UP, 7).addScaledVector(right, 5);
+  chaseFrom(p, pos, tangent, right, chasePos);
+  const totalW = swingChase(p, pos, tangent, chasePos);
   // Low beside the pad, then rising with the stack (a little below it at
   // first so it climbs up the frame), ending a few units above it looking down.
   const rise = smooth(seg(p, 0.008, 0.05));
   const over = smooth(seg(p, 0.04, 0.1));
-  _launch.set(pos.x + 14, lerp(Y_G + 7.2, pos.y - 1.5 + 6.5 * over, rise), pos.z + 17);
+  // and pulling back as it goes, so the exhaust column and the ground cloud stay in the shot
+  const pull = 1 + 1.0 * smooth(seg(p, 0.01, 0.055)) - 0.4 * smooth(seg(p, 0.07, 0.13));
+  _launch.set(pos.x + 14 * pull, lerp(Y_G + 7.2, pos.y - 3 * pull + 9 * over, rise), pos.z + 17 * pull);
   camera.position.copy(_launch).lerp(chasePos, toChase);
   lookAt.copy(pos).addScaledVector(tangent, 6 * toChase);
-  // Bias the aim toward the bodies being passed, blended by weight (no snaps).
-  let totalW = 0; featPos.set(0, 0, 0);
-  for (const f of FEATURES) {
-    if (!f.pos) continue;
-    const d = Math.abs(p - f.pAt); if (d >= f.w) continue;
-    const wgt = f.strength * smooth(1 - d / f.w);
-    featPos.addScaledVector(f.pos, wgt); totalW += wgt;
-  }
-  if (totalW > 0) {
-    featPos.multiplyScalar(1 / totalW);
-    _bias.copy(featPos).sub(lookAt).multiplyScalar(Math.min(totalW, 1));
-    const maxBias = camera.position.distanceTo(pos) * 0.22;
-    if (_bias.length() > maxBias) _bias.setLength(maxBias);
-    lookAt.add(_bias);
-  }
+  aimBias(lookAt, pos, totalW);
   // During the climb, keep the horizon in the frame below the ship.
   lookAt.y -= 3.5 * smooth(seg(p, 0.06, 0.11)) * (1 - toChase);
-  // At launch, aim right of the ship so it sits left of the centred headline.
-  const sideShift = (1 - toChase) * 7;
-  if (sideShift > 0.01) { _side.subVectors(pos, camera.position).normalize().cross(UP); if (_side.lengthSq() > 1e-8) lookAt.addScaledVector(_side.normalize(), sideShift); }
+  centreOnShip(lookAt, 2.5);
   safeLookAt(lookAt);
   commonUpdates(p);
 }
@@ -1967,61 +2774,106 @@ function orbitPoint(th, rho, outP, outT) {
   outT.copy(KF.u).multiplyScalar(-Math.sin(th)).addScaledVector(KF.v, Math.cos(th)).normalize();
 }
 let kepR = KEP_R0;
+const _du = new THREE.Vector3(), _arcT = new THREE.Vector3(), _arcP = new THREE.Vector3(), _arcU = new THREE.Vector3(), _camUp = new THREE.Vector3();
+const _qa = new THREE.Quaternion(), _qb = new THREE.Quaternion(), _qc = new THREE.Quaternion(), _qd = new THREE.Quaternion();
+const _camC = new THREE.Vector3(), _lookC = new THREE.Vector3(), _landT = new THREE.Vector3();
+/* The cruise's attitude reference, so the finale can blend away from it (see shipQuat). */
+function defaultUp(fwd, out) {
+  const vert = clamp((Math.abs(fwd.y) - 0.72) / 0.2, 0, 1);
+  return out.set(0, 1, 0).lerp(ALT_UP, vert).normalize();
+}
+/* Everything in the finale hands over to the next phase by blending, never by
+ * switching: the cruise's camera, attitude and thrust into the orbit's; the
+ * orbit's into the descent arc's; the arc's into the landing's. (They were
+ * separate branches, and each seam was a single-frame snap: the camera rolling
+ * 59 degrees onto the orbit, the ship turning 47 degrees onto the glide slope.) */
 function finale(p) {
   stackRoot.visible = false; orbiterRoot.visible = true;
   for (const q of plumes) q.live = q.kind === "srb" ? 0 : 0.3;
-  let thrust = 0.34, upRef = null;
+  let thrust = 0, kIn = smooth(seg(p, FINALE_START, FINALE_START + 0.012));
+  thrust = 0.3 * (1 - seg(p, FINALE_START, FINALE_START + 0.008));      // the cruise glow dies away as the orbit is entered
   if (p < F_ORBIT_END) {
-    // one full orbit, at constant speed
-    const th = Math.PI * 2 * (p - FINALE_START) / (F_ORBIT_END - FINALE_START);
+    // one full orbit, at constant speed, engines off
+    // the angular rate starts at the cruise's own speed and eases up to a
+    // steady one, so the ship does not leap forward as it enters the orbit
+    const x = p - FINALE_START, L = F_ORBIT_END - FINALE_START, xr = 0.009;
+    const w0 = KF.v0 / KEP_ORBIT, w1 = (Math.PI * 2 - w0 * xr / 2) / (L - xr / 2);
+    const th = w0 * x + (w1 - w0) * (x < xr ? x * x / (2 * xr) : x - xr / 2);
     orbitPoint(th, KEP_ORBIT, pos, tangent);
     _fu.copy(pos).sub(KF.K).normalize();
-    upRef = _fu;
   } else if (p < F_DESC_END) {
     // de-orbit: a descending arc, the mains burning harder
     const s = seg(p, F_ORBIT_END, F_DESC_END);
-    const th = Math.PI * 2 + DESC_ANGLE * s;
+    // angle along the arc as a Hermite curve: it leaves the orbit at the orbit's
+    // own rate and slows toward the landing's, instead of changing speed at the seam
+    const w0 = KF.v0 / KEP_ORBIT, L = F_ORBIT_END - FINALE_START, xr = 0.009;
+    const w1 = (Math.PI * 2 - w0 * xr / 2) / (L - xr / 2);
+    const m0 = w1 * (F_DESC_END - F_ORBIT_END), m1 = 0.6;
+    const th = Math.PI * 2 + (s * s * s - 2 * s * s + s) * m0 + (-2 * s * s * s + 3 * s * s) * DESC_ANGLE + (s * s * s - s * s) * m1;
     const rho = lerp(KEP_ORBIT, KEP_R0 + 5, smooth(s));
     orbitPoint(th, rho, pos, tangent);
     _fu.copy(pos).sub(KF.K).normalize();
     tangent.addScaledVector(_fu, -0.6 * (KEP_ORBIT - KEP_R0 - 5) / KEP_ORBIT * Math.sin(Math.PI * s)).normalize();
-    upRef = _fu; thrust = 0.34 + 0.7 * Math.sin(Math.PI * s);
+    thrust = 0.34 * smooth(seg(s, 0, 0.15)) + 0.7 * Math.sin(Math.PI * s);
   } else {
     // landing: the planet grows around the fixed landing point B
     const s = seg(p, F_DESC_END, 1);
     const e = 1 - Math.pow(1 - s, 2.2);
     const h = lerp(KF.h0, 0.06, e), d = lerp(KF.d0, 0, 1 - Math.pow(1 - s, 1.6));   // belly is ~0.08 above the vehicle origin
     pos.copy(KF.B).addScaledVector(KF.nB, h).addScaledVector(KF.fwd, -d);
-    // nose along the approach with a glide slope that flattens into a flare
+    // nose along the approach with a glide slope that flattens into a flare...
     const glide = lerp(0.32, -0.12, smooth(seg(s, 0.4, 0.86))) + 0.12 * smooth(seg(s, 0.88, 1));
-    tangent.copy(KF.fwd).multiplyScalar(Math.cos(glide)).addScaledVector(KF.nB, -Math.sin(glide)).normalize();
-    upRef = KF.nB; thrust = lerp(0.6, 0.15, s);
+    _landT.copy(KF.fwd).multiplyScalar(Math.cos(glide)).addScaledVector(KF.nB, -Math.sin(glide)).normalize();
+    // ...turned onto it from the heading the descent arc ended on, not snapped
+    orbitPoint(Math.PI * 2 + DESC_ANGLE, KEP_R0 + 5, _arcP, _arcT);
+    _arcU.copy(_arcP).sub(KF.K).normalize();
+    const kL = smooth(seg(s, 0, 0.5));
+    tangent.copy(_arcT).lerp(_landT, kL).normalize();
+    _fu.copy(_arcU).lerp(KF.nB, kL).normalize();
+    thrust = lerp(0.34, 0.14, s) + 0.45 * Math.sin(Math.PI * clamp(s * 1.6, 0, 1));
   }
   vehicle.position.copy(pos); vehicle.scale.setScalar(1);
-  orientShip(tangent, upRef);
+  // attitude: the cruise's and the planet-relative one, blended as rotations
+  // (blending the up vectors passes through nothing when they oppose)
+  shipQuat(tangent, null, _qa);
+  shipQuat(tangent, _fu, _qb);
+  vehicle.quaternion.slerpQuaternions(_qa, _qb, kIn);
   vehicle.updateMatrixWorld(true);
   engines(p, thrust);
 
-
-  // Camera: from the cruise chase into an orbit chase in the planet's radial
-  // frame, then into a low three-quarter view of the base for touchdown.
+  // Camera: the cruise chase (exactly as the cruise computes it) blended into
+  // an orbit chase in the planet's radial frame, then into a low three-quarter
+  // view of the base for touchdown.
   rightOf(tangent, right);
-  const cruise = _fc.copy(pos).addScaledVector(tangent, -27).addScaledVector(UP, 7).addScaledVector(right, 5);
-  _fr.crossVectors(tangent, _fu.lengthSq() > 0 ? _fu : UP).normalize();
-  const orbitCam = tmp.copy(pos).addScaledVector(tangent, -20).addScaledVector(upRef || UP, 9).addScaledVector(_fr, -6);
-  camera.position.copy(cruise).lerp(orbitCam, smooth(seg(p, FINALE_START, FINALE_START + 0.006)));
+  chaseFrom(p, pos, tangent, right, _camC);
+  const wC = swingChase(p, pos, tangent, _camC);
+  _lookC.copy(pos).addScaledVector(tangent, 6);
+  aimBias(_lookC, pos, wC, _camC);
+  _fr.crossVectors(tangent, _fu).normalize();
+  // high over the ship, looking down past it onto the planet: Kepler-452b fills
+  // the frame behind a centred ship
+  const orbitCam = tmp.copy(pos).addScaledVector(tangent, -11).addScaledVector(_fu, 17).addScaledVector(_fr, -5);
+  camera.position.copy(_camC).lerp(orbitCam, kIn);
+  const s = seg(p, F_DESC_END, 1), kD = smooth(seg(s, 0, 0.45));
   lookAt.copy(pos).addScaledVector(tangent, 5);
-  _bias.copy(KF.K).sub(lookAt).multiplyScalar(0.18);
-  lookAt.add(_bias.multiplyScalar(1 - seg(p, F_DESC_END, F_DESC_END + 0.004)));
-  let camUp = upRef || UP;
+  _bias.copy(KF.K).sub(lookAt).multiplyScalar(0.18 * (1 - kD));
+  lookAt.add(_bias);
+  lookAt.copy(_lookC).lerp(lookAt, kIn);
   if (p >= F_DESC_END) {
-    const s = seg(p, F_DESC_END, 1);
     const hNow = pos.clone().sub(KF.B).dot(KF.nB), dNow = -pos.clone().sub(KF.B).dot(KF.fwd);
     const landCam = _fl.copy(KF.B).addScaledVector(KF.fwd, -(dNow + 11) * (1 - s * 0.6) - 3 * s).addScaledVector(KF.nB, hNow + 3.5 + 1.5 * (1 - s)).addScaledVector(KF.side, 6 + 6 * s);
-    camera.position.lerp(landCam, smooth(seg(s, 0, 0.3)));
-    camUp = KF.nB;
+    camera.position.lerp(landCam, kD);
   }
-  safeLookAt(lookAt, camUp);
+  centreOnShip(lookAt, p >= F_DESC_END ? lerp(2.5, 9, seg(p, 0.993, 1)) : 2.5);
+  // the camera's roll likewise: its orientation with the cruise's up and with the planet's, slerped
+  // (in orbit the camera looks steeply down along the planet's "up", where that is a degenerate roll
+  // reference: lean it toward the flight direction, so the ship's heading stays up the screen)
+  _camUp.copy(_fu).addScaledVector(tangent, 1.4 * (1 - kD)).normalize();
+  safeLookAt(lookAt, UP); _qc.copy(camera.quaternion);
+  safeLookAt(lookAt, _camUp);
+  _qd.copy(camera.quaternion);                          // (a separate buffer: slerpQuaternions overwrites its own output first)
+  camera.quaternion.slerpQuaternions(_qc, _qd, kIn);
+  camera.up.copy(_camUp);
 }
 
 /* Everything that depends on p but not on which branch moved the ship. */
@@ -2030,7 +2882,7 @@ function commonUpdates(p) {
   earthAt(Math.min(p, 0.3));
   if (earthGroup) {
     earthGroup.position.copy(earthC); earthGroup.scale.setScalar(earthR);
-    EARTH_FEATURE.pos.copy(earthC).addScaledVector(tmp.copy(camera.position).sub(earthC).normalize(), earthR);
+    EARTH_FEATURE.pos.copy(earthC);   // the camera swings up off the planet's centre: looking down on the ship, Earth below
     const shipD = vehicle.position.distanceTo(earthC) - earthR;
     shipAlt = shipD / (ATM_T * earthR);
     const detail = 1 - smooth(seg(earthR, 5200, 2600));
@@ -2056,7 +2908,7 @@ function commonUpdates(p) {
      * whatever the last finale frame (or the shader warm-up) had left: a
      * 2,400-unit landing-scale sphere that the camera flew 500 units inside
      * on the approach, so the planet seemed to be missing. */
-    kepR = p >= F_DESC_END ? Math.exp(lerp(Math.log(KEP_R0), Math.log(KEP_R_LAND), Math.pow(seg(p, F_DESC_END, 1), 0.85))) : KEP_R0;
+    kepR = p >= F_DESC_END ? Math.exp(lerp(Math.log(KEP_R0), Math.log(KEP_R_LAND), Math.pow(seg(p, F_DESC_END, 1), 1.1))) : KEP_R0;
     kepler.R = kepR;
     kepler.C.copy(KF.B).addScaledVector(KF.nB, -kepR);
     kepler.group.position.copy(kepler.C); kepler.group.scale.setScalar(kepR);
@@ -2071,37 +2923,69 @@ function commonUpdates(p) {
     const khz = lerp(1, 0.14, smooth(clamp(Math.log(kepler.R / KEP_R0) / Math.log(KEP_R_LAND / KEP_R0), 0, 1)));
     kepler.surfMat.uniforms.uHaze.value = khz; kepler.cloudMat.uniforms.uHaze.value = khz;
     if (base) { fadeGroup(base, smooth(seg(kepler.R, 320, 760))); }
+    if (beacon) beacon.visible = Math.sin(elapsed * 4.2) > 0.2;
+    updateBaseDust(p);
   }
   // daylight: how deep in Earth's atmosphere the camera is
   const camAlt = (camera.position.distanceTo(earthC) - earthR) / (ATM_T * earthR);
   const kepAlt = kepler ? (camera.position.distanceTo(kepler.C) - kepler.R) / (0.032 * kepler.R) : 9;
   const day = Math.max(earthGroup && earthGroup.visible ? 1 - smooth(seg(camAlt, 0.1, 1.0)) : 0, kepler && kepler.group.visible ? 1 - smooth(seg(kepAlt, 0.1, 1.0)) : 0);
   hemi.intensity = 0.7 * day;
-  if (starSphere) starSphere.material.color.setScalar(1 - 0.92 * day);
+  fill.intensity = 0.9 * (1 - day) * smooth(seg(p, 0.1, 0.16));
+  fill.position.copy(camera.position); fill.target.position.copy(vehicle.position);
+  if (starSphere) {
+    starSphere.material.uniforms.uColor.value.setScalar(1 - 0.92 * day); skyStars.material.uniforms.uOpacity.value = 1 - 0.95 * day;
+    // the galaxies: invisible to the eye from anywhere near the Sun (even Andromeda is a smudge), they come up only as the voyage leaves the solar system
+    const gk = (1 - day) * smooth(seg(p, 0.52, 0.72));
+    for (const q of deepSky) { q.material.opacity = gk; q.visible = gk > 0.01; }
+  }
   ambient.intensity = 0.18 + 0.3 * (1 - day);
   // launch site
   const groundOn = p < 0.11;
   if (gantry) gantry.visible = groundOn;
   if (crawler) crawler.visible = groundOn;
   if (padProps) padProps.visible = groundOn;
-  if (puffs) updateLaunchFx(p);
+  scene.fog.density = groundOn ? 0.0032 * (1 - smooth(seg(p, 0.06, 0.11))) : 0;
+  if (kscGroup) {
+    kscGroup.visible = groundOn;
+    // sit on the curved ground: the planet falls away from the pad as it shrinks
+    kscGroup.position.y = Y_G - (140 * 140) / (2 * earthR);
+    countdown.visible = groundOn;
+    if (groundOn) countdown.userData.setTime(missionTime(p));
+  }
+  if (smoke) updateLaunchFx(p);
   // bodies
-  for (const k in bodies) {
-    const w = VIS[k]; if (!w) continue;
-    const v = Math.min(seg(p, w[0], w[1]), 1 - seg(p, w[2], w[3]));
-    fadeGroup(bodies[k].group, v);
-  }
-  if (starGlow) {
+  updateBodies(p);
+  if (starGlow && bodies.star) {
+    /* Kepler-452 is a point of light for most of the interstellar leg - its
+     * disc and glow are held to a fixed small angular size - and only takes on
+     * its real size as the ship arrives in its system. */
     const w = VIS.star, v = Math.min(seg(p, w[0], w[1]), 1 - seg(p, w[2], w[3]));
+    const st = bodies.star, d = camera.position.distanceTo(st.pos);
+    const s = lerp(Math.min(1, 0.007 * d / 42), 1, smooth(seg(p, 0.86, 0.93)));
+    st.group.visible = v > 0.01; st.group.scale.setScalar(s);
+    st.mat.uniforms.uOpacity.value = v;
     starGlow.mesh.visible = v > 0.01; starGlow.mesh.material.uniforms.uOpacity.value = v;
+    starGlow.set(0, st.pos.x, st.pos.y, st.pos.z, 42 * 9 * s, 0, 1.0, 0.93, 0.78, 0.85);
+    starGlow.set(1, st.pos.x, st.pos.y, st.pos.z, 42 * 3.2 * s, 0, 1.0, 0.97, 0.9, 1.0);
+    starGlow.upload();
   }
-  // fields: cross-fade over the edges of each window
+  // fields: their chapter window, then distance (see addField)
   for (const f of fields) {
-    const v = Math.min(seg(p, f.vis[0], f.vis[0] + 0.03), 1 - seg(p, f.vis[1] - 0.03, f.vis[1]));
+    const win = Math.min(seg(p, f.vis[0], f.vis[0] + 0.05), 1 - seg(p, f.vis[1] - 0.04, f.vis[1]));
+    let v = win, far = 0;
+    if (f.center) {
+      far = smooth(seg(camera.position.distanceTo(f.center), f.dFull, f.dGhost));   // 0 inside .. 1 far off
+      v = win * lerp(1, 0.12, far);
+    }
     f.obj.visible = v > 0.01;
     if (f.obj.visible) for (const mm of f.mats) { if (mm.m.uniforms) mm.m.uniforms.uOpacity.value = mm.op0 * v; else mm.m.opacity = mm.op0 * v; }
+    if (f.imp) {
+      const iv = win * far;
+      f.imp.mesh.visible = iv > 0.01; f.imp.mesh.material.uniforms.uOpacity.value = iv;
+    }
   }
-  if (localStars) { localStars.material.uniforms.uOpacity.value = 0.9 * (1 - day) * (1 - seg(p, 0.985, 1)); localStars.visible = localStars.material.uniforms.uOpacity.value > 0.01; }
+  if (localStars) { localStars.material.uniforms.uOpacity.value = 0.6 * (1 - day) * (1 - seg(p, 0.985, 1)); localStars.visible = localStars.material.uniforms.uOpacity.value > 0.01; }
   updateDebris(p);
   updateHud(p);
 }
@@ -2126,7 +3010,7 @@ function tick() {
   if (starSphere) starSphere.position.copy(camera.position);
   skyDome.position.copy(camera.position);
   for (const k in bodies) if (bodies[k].spin) bodies[k].mesh.rotation.y = elapsed * bodies[k].spin;
-  if (earthCloudMat) earthCloudMat.uniforms.uTime.value = elapsed;
+  if (earthCloudMat) { earthCloudMat.uniforms.uTime.value = elapsed; earthSurfMat.uniforms.uTime.value = elapsed; }
   if (kepler) kepler.cloudMat.uniforms.uTime.value = elapsed;
   if (bodies.star) bodies.star.mat.uniforms.uTime.value = elapsed;
   renderFrame();

@@ -24,6 +24,8 @@ python3 -m http.server 8123
 - `index.html` - the scroll panels; each declares the point of the voyage it narrates (`data-t`)
 - `styles.css` - layout, gradient titles, scroll-driven text reveals
 - `app.js` - the whole scene: atmosphere scattering, the launch site, planets, nebulae, the flight and the landing
+- `lib/ksc.js` - the Kennedy Space Center buildings (VAB, Launch Control Center, hangar, countdown clock)
+- `lib/deepsky.js` - painted galaxies and nebulae for the deep-space backdrop
 - `models/` - the gantry and the spaceship
 - `3D Models/`, `Images and Textures/` - NASA public-domain models and textures
 
@@ -41,4 +43,5 @@ the same idea in reverse for the landing.
 ## Branches
 
 - `main` - the original single-model version.
-- `multi-spaceship-components` - this version.
+- `multi-spaceship-components` - the multi-component launch and landing.
+- `refinements` - this version: detailed launch site and exhaust, distance-revealed planets, moons and waymarks, painted deep sky.
