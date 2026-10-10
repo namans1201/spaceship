@@ -26,13 +26,11 @@ A plain `git clone` gives a complete working site: every model and texture the
 site loads is committed in the repository.
 
 ```bash
-git clone -b refinements https://github.com/namans1201/stellar-voyager.git
+git clone https://github.com/namans1201/stellar-voyager.git
 cd stellar-voyager
 python3 -m http.server 8123
 ```
 
-(`-b refinements` matters: the default branch `main` is the original single-model
-version, and `refinements` is the one described here.)
 
 Then open http://localhost:8123
 
@@ -176,6 +174,13 @@ NASA media (models and textures) is public domain.
 
 ## Branches
 
-- `main` - the original single-model version
-- `multi-spaceship-components` - the multi-component launch and landing, where the spaceship separates into parts
-- `refinements` - this version: detailed launch site and exhaust, distance-revealed planets, moons and waymarks, painted deep sky, and the library models
+`main` is the current version and the one you get from a plain clone. The two
+earlier stages are kept as branches (and tags) so the history stays browsable:
+
+| Branch | Tag | What it is |
+|---|---|---|
+| `main` | `v3` | Stellar Voyager: detailed launch site and exhaust, distance-scaled planets, moons and probes, painted deep sky, the library models, a smooth finale |
+| `v2-multi-components` | `v2` | The second stage: launch from LC-39A, layered atmosphere, the spaceship separating into parts, Kepler-452b landing |
+| `v1-initial-draft` | `v1` | The first draft: the original single-model version |
+
+To look at an earlier stage: `git clone -b v1-initial-draft https://github.com/namans1201/stellar-voyager.git`
