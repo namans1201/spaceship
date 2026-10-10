@@ -1,4 +1,4 @@
-# Voyage - Earth to Kepler-452b
+# Stellar Voyager: Earth to Kepler-452b
 
 A scroll-driven 3D journey built with Three.js. The Space Shuttle stands on its
 launcher at Launch Complex 39A on the Florida coast; as you scroll, it lights
@@ -26,8 +26,8 @@ A plain `git clone` gives a complete working site: every model and texture the
 site loads is committed in the repository.
 
 ```bash
-git clone -b refinements <repository-url> voyage
-cd voyage
+git clone -b refinements https://github.com/namans1201/stellar-voyager.git
+cd stellar-voyager
 python3 -m http.server 8123
 ```
 
