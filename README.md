@@ -30,6 +30,11 @@ git clone https://github.com/namans1201/stellar-voyager.git
 cd stellar-voyager
 python3 -m http.server 8123
 ```
+or
+```
+python -m http.server 8123
+
+```
 
 
 Then open http://localhost:8123
