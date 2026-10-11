@@ -33,7 +33,6 @@ python3 -m http.server 8123
 or
 ```
 python -m http.server 8123
-
 ```
 
 
